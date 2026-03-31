@@ -11,6 +11,10 @@
   "payment_mode",
   "column_break_ephj",
   "invoice",
+  "external_order_id",
+  "source_system",
+  "source_doctype",
+  "source_docname",
   "amount",
   "created_at",
   "section_break_qkxx",
@@ -47,12 +51,36 @@
    "reqd": 1
   },
   {
-   "description": "Linked POS Invoice",
+   "description": "Linked ERPNext POS Invoice (legacy field)",
    "fieldname": "invoice",
    "fieldtype": "Link",
    "in_list_view": 1,
    "label": "Invoice",
    "options": "POS Invoice"
+  },
+  {
+   "description": "Host application order identifier",
+   "fieldname": "external_order_id",
+   "fieldtype": "Data",
+   "label": "External Order ID"
+  },
+  {
+   "description": "Host application name (example: ERPNext)",
+   "fieldname": "source_system",
+   "fieldtype": "Data",
+   "label": "Source System"
+  },
+  {
+   "description": "Source document type in host app",
+   "fieldname": "source_doctype",
+   "fieldtype": "Data",
+   "label": "Source DocType"
+  },
+  {
+   "description": "Source document name in host app",
+   "fieldname": "source_docname",
+   "fieldtype": "Data",
+   "label": "Source DocName"
   },
   {
    "fieldname": "status",
