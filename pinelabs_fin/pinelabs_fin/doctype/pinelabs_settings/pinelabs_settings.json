@@ -1,0 +1,111 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-03-30 19:22:49.130280",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "enabled",
+  "machine_configurations_section",
+  "machines",
+  "section_break_odjq",
+  "api_endpoints",
+  "section_break_ullw",
+  "webhooks_url",
+  "column_break_gfzq",
+  "last_sync",
+  "advanced_settings_section",
+  "auto_cancel_duration_minutes"
+ ],
+ "fields": [
+  {
+   "default": "0",
+   "description": "Enable Pine Labs payment integration",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "machine_configurations_section",
+   "fieldtype": "Section Break",
+   "label": "Machine Configurations"
+  },
+  {
+   "description": "Configure Pine Labs machines with their respective credentials",
+   "fieldname": "machines",
+   "fieldtype": "Table",
+   "label": "Machines",
+   "options": "Pinelabs Machine Config",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_odjq",
+   "fieldtype": "Section Break",
+   "label": "API Endpoints"
+  },
+  {
+   "fieldname": "api_endpoints",
+   "fieldtype": "Table",
+   "label": "API Endpoints",
+   "options": "Pinelabs API Endpoints"
+  },
+  {
+   "fieldname": "section_break_ullw",
+   "fieldtype": "Section Break",
+   "label": "Webhook Configuration"
+  },
+  {
+   "description": "URL to configure in Pine Labs dashboard for payment notifications",
+   "fieldname": "webhooks_url",
+   "fieldtype": "Data",
+   "label": "Webhooks URL"
+  },
+  {
+   "fieldname": "column_break_gfzq",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "Last webhook received timestamp",
+   "fieldname": "last_sync",
+   "fieldtype": "Datetime",
+   "label": "Last Sync"
+  },
+  {
+   "fieldname": "advanced_settings_section",
+   "fieldtype": "Section Break",
+   "label": "Advanced Settings"
+  },
+  {
+   "description": "Auto-cancel pending transactions after specified minutes (default: 3)",
+   "fieldname": "auto_cancel_duration_minutes",
+   "fieldtype": "Int",
+   "label": "Auto Cancel Duration (Minutes)"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-03-30 19:44:48.906862",
+ "modified_by": "Administrator",
+ "module": "Pinelabs Fin",
+ "name": "Pinelabs Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
