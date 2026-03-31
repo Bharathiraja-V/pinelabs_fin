@@ -1,0 +1,103 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-03-30 18:46:25.624634",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "machine_name",
+  "warehouse",
+  "merchant_id",
+  "client_id",
+  "security_token",
+  "store_id",
+  "device_number",
+  "enabled",
+  "description"
+ ],
+ "fields": [
+  {
+   "description": "Unique name for this machine configuration",
+   "fieldname": "machine_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Machine Name",
+   "reqd": 1
+  },
+  {
+   "description": "Warehouse associated with this machine (optional - for warehouse-based machine selection)",
+   "fieldname": "warehouse",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Warehouse",
+   "options": "Warehouse"
+  },
+  {
+   "description": "Pine Labs Merchant ID",
+   "fieldname": "merchant_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Merchant ID",
+   "reqd": 1
+  },
+  {
+   "description": "Pine Labs Client ID",
+   "fieldname": "client_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Client ID",
+   "reqd": 1
+  },
+  {
+   "description": "Pine Labs Security Token (encrypted)",
+   "fieldname": "security_token",
+   "fieldtype": "Password",
+   "in_list_view": 1,
+   "label": "Security Token",
+   "reqd": 1
+  },
+  {
+   "description": "Pine Labs Store ID",
+   "fieldname": "store_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Store ID",
+   "reqd": 1
+  },
+  {
+   "description": "Device Number",
+   "fieldname": "device_number",
+   "fieldtype": "Data",
+   "label": "Device Number"
+  },
+  {
+   "default": "0",
+   "description": "Enable this machine configuration",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "description": "Optional description for this machine",
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-03-30 19:45:19.576369",
+ "modified_by": "Administrator",
+ "module": "Pinelabs Fin",
+ "name": "Pinelabs Machine Config",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

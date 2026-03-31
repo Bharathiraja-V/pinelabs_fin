@@ -1,0 +1,98 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-03-30 19:07:16.409629",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "endpoints_name",
+  "base_api_url",
+  "section_break_kxsa",
+  "upload_transaction_endpoint",
+  "get_status_endpoint",
+  "cancel_transaction_endpoint",
+  "is_active",
+  "description"
+ ],
+ "fields": [
+  {
+   "description": "Name for this API endpoint (e.g., Production, UAT, Test)",
+   "fieldname": "endpoints_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Endpoints Name",
+   "reqd": 1
+  },
+  {
+   "description": "Base URL for Pine Labs API (e.g., https://www.plutuscloudserviceuat.in:8201)",
+   "fieldname": "base_api_url",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Base API URL",
+   "reqd": 1
+  },
+  {
+   "fieldname": "section_break_kxsa",
+   "fieldtype": "Section Break",
+   "label": "API Endpoint Paths"
+  },
+  {
+   "default": "/API/CloudBasedIntegration/V1/UploadBilledTransaction",
+   "description": "Endpoint path for uploading billed transactions",
+   "fieldname": "upload_transaction_endpoint",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Upload Transaction Endpoint",
+   "reqd": 1
+  },
+  {
+   "default": "/API/CloudBasedIntegration/V1/GetCloudBasedTxnStatus",
+   "description": "Endpoint path for checking transaction status",
+   "fieldname": "get_status_endpoint",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Get Status Endpoint",
+   "reqd": 1
+  },
+  {
+   "default": "/API/CloudBasedIntegration/V1/CancelTransaction",
+   "description": "Endpoint path for cancelling transactions",
+   "fieldname": "cancel_transaction_endpoint",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Cancel Transaction Endpoint",
+   "reqd": 1
+  },
+  {
+   "default": "0",
+   "description": "Enable this endpoint",
+   "fieldname": "is_active",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Is Active"
+  },
+  {
+   "description": "Optional description for this endpoint",
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "in_list_view": 1,
+   "label": "Description"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-03-30 19:45:31.041174",
+ "modified_by": "Administrator",
+ "module": "Pinelabs Fin",
+ "name": "Pinelabs API Endpoints",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
