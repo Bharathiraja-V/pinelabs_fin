@@ -7,6 +7,7 @@ import frappe
 import json
 from frappe import _
 from frappe.utils import flt
+from pinelabs_fin.api.host_adapter import get_host_adapter
 from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
 
 
@@ -76,12 +77,22 @@ def _get_active_endpoint_name(settings):
     if settings.api_endpoints:
         for endpoint in settings.api_endpoints:
             if endpoint.is_active:
-                return endpoint.endpoint_name
+                return (
+                    getattr(endpoint, "endpoints_name", None)
+                    or getattr(endpoint, "endpoint_name", None)
+                )
     return None
 
 
 @frappe.whitelist()
-def initiate_payment(invoice_name, amount, payment_mode="Card"):
+def initiate_payment(
+    invoice_name,
+    amount,
+    payment_mode="Card",
+    source_system=None,
+    source_doctype=None,
+    source_docname=None,
+):
     """
     Initiate Pine Labs payment transaction
     Called from POSawesome frontend
@@ -103,12 +114,12 @@ def initiate_payment(invoice_name, amount, payment_mode="Card"):
             }
 
         # Verify invoice exists (check both POS Invoice and Sales Invoice)
-        invoice_doctype = None
-        if frappe.db.exists("POS Invoice", invoice_name):
+        invoice_doctype = source_doctype if source_doctype and frappe.db.exists(source_doctype, invoice_name) else None
+        if not invoice_doctype and frappe.db.exists("POS Invoice", invoice_name):
             invoice_doctype = "POS Invoice"
-        elif frappe.db.exists("Sales Invoice", invoice_name):
+        if not invoice_doctype and frappe.db.exists("Sales Invoice", invoice_name):
             invoice_doctype = "Sales Invoice"
-        else:
+        if not invoice_doctype:
             return {
                 "success": False,
                 "error": _("Invoice {0} not found").format(invoice_name)
@@ -134,10 +145,10 @@ def initiate_payment(invoice_name, amount, payment_mode="Card"):
             invoice_name=invoice_name,
             amount=amount,
             payment_mode=payment_mode,
-            source_system="ERPNext",
-            source_doctype=invoice_doctype,
-            source_docname=invoice_name,
-            external_order_id=invoice_name,
+            source_system=source_system or "fin_pos",
+            source_doctype=source_doctype or invoice_doctype,
+            source_docname=source_docname or invoice_name,
+            external_order_id=source_docname or invoice_name,
         )
 
         if result.get("success"):
@@ -153,6 +164,8 @@ def initiate_payment(invoice_name, amount, payment_mode="Card"):
                 "message": _("Payment initiated. Please complete payment on terminal."),
                 "amount": amount,
                 "payment_mode": payment_mode,
+                "invoice_name": invoice_name,
+                "invoice_doctype": source_doctype or invoice_doctype,
                 "response_code": result.get("response_code"),
                 "response_message": result.get("response_message")
             }
@@ -183,6 +196,90 @@ def initiate_payment(invoice_name, amount, payment_mode="Card"):
         }
 
 
+def _get_transaction_log(transaction_reference):
+    if not transaction_reference:
+        return None
+    if not frappe.db.exists("Pinelabs Transaction Log", {"transaction_reference": transaction_reference}):
+        return None
+    return frappe.get_doc("Pinelabs Transaction Log", {"transaction_reference": transaction_reference})
+
+
+def _normalize_status(status):
+    value = (status or "").strip().lower()
+    if value == "approved":
+        return "Approved"
+    if value == "declined":
+        return "Declined"
+    if value in ("cancel", "cancelled"):
+        return "Cancelled"
+    if value == "failed":
+        return "Failed"
+    if value == "timeout":
+        return "Timeout"
+    if value == "pending":
+        return "Pending"
+    return status or "Unknown"
+
+
+def _build_status_response(
+    log,
+    *,
+    success=True,
+    message=None,
+    error=None,
+    response_code=None,
+    response_message=None,
+    finalization=None,
+):
+    adapter = get_host_adapter()
+    source_doctype, source_docname = adapter.get_order_reference(log)
+    order_doc = adapter.get_order_doc(source_docname, doctype=source_doctype) if source_docname else None
+
+    invoice_name = (
+        (finalization or {}).get("invoice_name")
+        or (order_doc.name if order_doc else None)
+        or source_docname
+        or log.external_order_id
+        or log.invoice
+    )
+    invoice_doctype = (
+        (finalization or {}).get("invoice_doctype")
+        or (order_doc.doctype if order_doc else None)
+        or source_doctype
+    )
+    invoice_finalized = bool(
+        (finalization or {}).get("invoice_finalized")
+        if finalization and finalization.get("invoice_finalized") is not None
+        else (adapter.is_order_finalized(order_doc) if order_doc else False)
+    )
+    finalization_status = (
+        (finalization or {}).get("finalization_status")
+        or ("already_finalized" if invoice_finalized else "pending")
+    )
+
+    return {
+        "success": bool(success),
+        "status": _normalize_status(log.status),
+        "transaction_reference": log.transaction_reference,
+        "invoice_name": invoice_name,
+        "invoice_doctype": invoice_doctype,
+        "invoice_finalized": invoice_finalized,
+        "finalization_status": finalization_status,
+        "message": message or (finalization or {}).get("message") or response_message,
+        "error": error or (finalization or {}).get("error"),
+        "response_code": response_code,
+        "response_message": response_message,
+        "amount": log.amount,
+        "payment_mode": log.payment_mode,
+        "source_system": log.source_system,
+        "source_doctype": log.source_doctype,
+        "source_docname": log.source_docname,
+        "external_order_id": log.external_order_id or log.invoice,
+        "rrn": getattr(log, "rrn", None),
+        "approval_code": getattr(log, "approval_code", None),
+    }
+
+
 @frappe.whitelist()
 def check_payment_status(transaction_reference):
     """
@@ -196,62 +293,62 @@ def check_payment_status(transaction_reference):
         JSON response with status details
     """
     try:
-        # Get machine from transaction log
-        machine_name = _get_machine_from_transaction_log(transaction_reference)
-        
-        # Initialize Pine Labs client with machine (handles validation and transaction log check)
-        client = get_pinelabs_client(machine_name=machine_name)
-
-        # Get transaction status (client validates transaction_reference and checks log exists)
-        result = client.get_transaction_status(transaction_reference)
-
-        if result.get("success"):
-            status = result.get("status")
-
-            frappe.logger().info(
-                f"Transaction status for {transaction_reference}: {status}"
-            )
-
-            # Get updated transaction log
-            log = frappe.get_doc("Pinelabs Transaction Log", {
-                "transaction_reference": transaction_reference
-            })
-
-            response = {
-                "success": True,
-                "status": status,
-                "transaction_reference": transaction_reference,
-                "response_code": result.get("response_code"),
-                "response_message": result.get("response_message"),
-                "rrn": result.get("rrn"),
-                "approval_code": result.get("approval_code"),
-                "invoice": log.invoice,
-                "external_order_id": log.external_order_id or log.invoice,
-                "source_system": log.source_system,
-                "amount": log.amount,
-                "payment_mode": log.payment_mode
-            }
-
-            # If approved, include additional details for payment posting
-            # Handle both "Approved" and "APPROVED" for compatibility
-            if status in ["Approved", "APPROVED"]:
-                response.update({
-                    "card_number": log.card_number,
-                    "card_type": log.card_type,
-                    "bank_name": log.bank_name
-                })
-
-            return response
-        else:
-            frappe.logger().error(
-                f"Status check failed for {transaction_reference}: {result.get('error')}"
-            )
-
+        log = _get_transaction_log(transaction_reference)
+        if not log:
             return {
                 "success": False,
-                "error": result.get("error", _("Failed to get transaction status")),
-                "status": "Unknown"
+                "status": "Unknown",
+                "transaction_reference": transaction_reference,
+                "invoice_name": None,
+                "invoice_doctype": None,
+                "invoice_finalized": False,
+                "finalization_status": "missing",
+                "message": None,
+                "error": _("Transaction {0} not found").format(transaction_reference),
             }
+
+        result = None
+        if _normalize_status(log.status) == "Pending":
+            machine_name = _get_machine_from_transaction_log(transaction_reference)
+            client = get_pinelabs_client(machine_name=machine_name)
+            result = client.get_transaction_status(transaction_reference)
+            refreshed_log = _get_transaction_log(transaction_reference)
+            if refreshed_log:
+                log = refreshed_log
+
+            if result and not result.get("success") and _normalize_status(log.status) == "Pending":
+                return _build_status_response(
+                    log,
+                    success=True,
+                    message=result.get("error") or _("Waiting for payment confirmation."),
+                    response_code=result.get("response_code"),
+                    response_message=result.get("response_message"),
+                )
+
+        finalization = None
+        status = _normalize_status(log.status)
+        if status == "Approved":
+            finalization = get_host_adapter().finalize_transaction(log)
+            refreshed_log = _get_transaction_log(transaction_reference)
+            if refreshed_log:
+                log = refreshed_log
+            return _build_status_response(
+                log,
+                success=bool(finalization.get("success", False)),
+                message=(finalization or {}).get("message") or _("Payment approved."),
+                error=(finalization or {}).get("error"),
+                response_code=(result or {}).get("response_code"),
+                response_message=(result or {}).get("response_message"),
+                finalization=finalization,
+            )
+
+        return _build_status_response(
+            log,
+            success=True,
+            message=(result or {}).get("response_message"),
+            response_code=(result or {}).get("response_code"),
+            response_message=(result or {}).get("response_message"),
+        )
 
     except Exception as e:
         frappe.logger().error(f"Error in check_payment_status: {str(e)}")
@@ -277,6 +374,27 @@ def cancel_payment(transaction_reference):
         JSON response with cancellation result
     """
     try:
+        log = _get_transaction_log(transaction_reference)
+        if not log:
+            return {
+                "success": False,
+                "status": "Unknown",
+                "transaction_reference": transaction_reference,
+                "invoice_name": None,
+                "invoice_doctype": None,
+                "invoice_finalized": False,
+                "finalization_status": "missing",
+                "error": _("Transaction {0} not found").format(transaction_reference),
+            }
+
+        current_status = _normalize_status(log.status)
+        if current_status in ["Approved", "Declined", "Cancelled", "Failed", "Timeout"]:
+            return _build_status_response(
+                log,
+                success=False,
+                error=_("Cannot cancel transaction with status: {0}").format(current_status),
+            )
+
         # Get machine from transaction log
         machine_name = _get_machine_from_transaction_log(transaction_reference)
         
@@ -291,20 +409,27 @@ def cancel_payment(transaction_reference):
                 f"Transaction cancelled successfully: {transaction_reference}"
             )
 
-            return {
-                "success": True,
-                "message": _("Transaction cancelled successfully"),
-                "transaction_reference": transaction_reference
-            }
+            refreshed_log = _get_transaction_log(transaction_reference) or log
+            return _build_status_response(
+                refreshed_log,
+                success=True,
+                message=result.get("message") or _("Transaction cancelled successfully"),
+                response_code=result.get("response_code"),
+                response_message=result.get("response_message"),
+            )
         else:
             frappe.logger().error(
                 f"Cancellation failed for {transaction_reference}: {result.get('error')}"
             )
 
-            return {
-                "success": False,
-                "error": result.get("error", _("Failed to cancel transaction"))
-            }
+            refreshed_log = _get_transaction_log(transaction_reference) or log
+            return _build_status_response(
+                refreshed_log,
+                success=False,
+                error=result.get("error", _("Failed to cancel transaction")),
+                response_code=result.get("response_code"),
+                response_message=result.get("response_message"),
+            )
 
     except Exception as e:
         frappe.logger().error(f"Error in cancel_payment: {str(e)}")

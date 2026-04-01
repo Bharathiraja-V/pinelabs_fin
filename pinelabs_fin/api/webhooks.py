@@ -73,7 +73,9 @@ def _update_transaction_details(log, data):
     )
 
     if log.payment_mode == "Card":
-        log.card_number = data.get("CardNumber") or data.get("card_number") or log.card_number
+        log.card_number_masked = (
+            data.get("CardNumber") or data.get("card_number") or log.card_number_masked
+        )
         log.card_type = data.get("CardType") or data.get("card_type") or log.card_type
         log.card_holder_name = (
             data.get("CardHolderName") or
@@ -179,46 +181,19 @@ def auto_update_invoice_payment(transaction_log):
     from the frontend for better user control
     """
     try:
-        order_id = transaction_log.external_order_id or transaction_log.invoice
-        if not order_id:
-            return
-
         adapter = get_host_adapter()
-        invoice = adapter.get_order_doc(order_id)
-        if not invoice:
-            frappe.logger().warning(f"Order {order_id} not found, skipping auto-update")
+        result = adapter.finalize_transaction(transaction_log)
+
+        if result.get("success"):
+            frappe.logger().info(
+                f"Webhook finalization completed for {transaction_log.transaction_reference}: "
+                f"{result.get('invoice_doctype')} {result.get('invoice_name')}"
+            )
             return
 
-        # Check if invoice is already paid
-        if adapter.is_order_paid(invoice):
-            frappe.logger().info(f"Invoice {invoice.name} already paid, skipping auto-update")
-            return
-
-        # Check if payment entry already exists for this transaction
-        existing_payment = adapter.payment_exists(transaction_log.transaction_reference)
-
-        if existing_payment:
-            frappe.logger().info(f"Payment already exists for {transaction_log.transaction_reference}")
-            return
-
-        frappe.logger().info(
-            f"Auto-updating invoice {invoice.name} with payment "
-            f"from transaction {transaction_log.transaction_reference}"
-        )
-
-        # Note: Actual invoice update logic depends on your POSawesome setup
-        # This is a placeholder - adjust based on your requirements
-
-        # Option 1: Add to invoice payments table (if not submitted)
-        # Option 2: Create separate Payment Entry
-        # Option 3: Let frontend handle it (recommended)
-
-        # For now, just log the event
-        frappe.logger().info(
-            f"Payment approved for invoice {invoice.name}: "
-            f"Amount {transaction_log.amount}, "
-            f"RRN {transaction_log.rrn}, "
-            f"Approval Code {transaction_log.approval_code}"
+        frappe.logger().warning(
+            f"Webhook finalization did not complete for {transaction_log.transaction_reference}: "
+            f"{result.get('error') or result.get('finalization_status')}"
         )
 
     except Exception as e:

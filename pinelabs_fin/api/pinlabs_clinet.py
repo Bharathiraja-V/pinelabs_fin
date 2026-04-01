@@ -97,14 +97,29 @@ class PineLabsClient:
                   "Please add at least one active endpoint.")
             )
         
-        self.base_url = active_endpoint.api_url
+        self.base_url = (
+            getattr(active_endpoint, "base_api_url", None)
+            or getattr(active_endpoint, "api_url", None)
+        )
         if not self.base_url:
             frappe.throw(_("Active API endpoint URL is not configured for machine '{0}'").format(machine_name))
 
         # Store endpoint paths
-        self.upload_endpoint = active_endpoint.upload_endpoint or "/API/CloudBasedIntegration/V1/UploadBilledTransaction"
-        self.status_endpoint = active_endpoint.status_endpoint or "/API/CloudBasedIntegration/V1/GetCloudBasedTxnStatus"
-        self.cancel_endpoint = active_endpoint.cancel_endpoint or "/API/CloudBasedIntegration/V1/CancelTransaction"
+        self.upload_endpoint = (
+            getattr(active_endpoint, "upload_transaction_endpoint", None)
+            or getattr(active_endpoint, "upload_endpoint", None)
+            or "/API/CloudBasedIntegration/V1/UploadBilledTransaction"
+        )
+        self.status_endpoint = (
+            getattr(active_endpoint, "get_status_endpoint", None)
+            or getattr(active_endpoint, "status_endpoint", None)
+            or "/API/CloudBasedIntegration/V1/GetCloudBasedTxnStatus"
+        )
+        self.cancel_endpoint = (
+            getattr(active_endpoint, "cancel_transaction_endpoint", None)
+            or getattr(active_endpoint, "cancel_endpoint", None)
+            or "/API/CloudBasedIntegration/V1/CancelTransaction"
+        )
 
         # Store credentials from machine
         self.merchant_id = machine.merchant_id
@@ -967,6 +982,7 @@ class PineLabsClient:
             log = frappe.get_doc("Pinelabs Transaction Log", {
                 "transaction_reference": transaction_reference
             })
+            updates = {}
 
             # Update status based on ResponseCode
             # ResponseCode 0 from GetStatus API means Approved - trust it immediately
@@ -991,22 +1007,22 @@ class PineLabsClient:
             if response_code == 0 or response_code == "0":
                 # ResponseCode 0 from GetStatus API means Approved - trust it
                 # This is called from get_transaction_status() which means payment is completed
-                log.status = "Approved"
-                log.completed_at = now_datetime()
+                updates["status"] = "Approved"
+                updates["completed_at"] = now_datetime()
             elif response_code == 1001 or response_code == "1001":
                 # ResponseCode 1001 means "TXN UPLOADED" - transaction uploaded but payment not completed yet
                 # However, if we have RRN/ApprovalCode, payment is actually completed
                 if has_completion_data:
                     # Payment completed despite ResponseCode 1001 (may happen with UPI)
-                    log.status = "Approved"
-                    log.completed_at = now_datetime()
+                    updates["status"] = "Approved"
+                    updates["completed_at"] = now_datetime()
                     frappe.logger().info(
                         f"Transaction {transaction_reference} marked as Approved "
                         f"(ResponseCode 1001 but has RRN/ApprovalCode - payment completed)"
                     )
                 else:
                     # Keep status as Pending
-                    log.status = "Pending"
+                    updates["status"] = "Pending"
                     frappe.logger().info(
                         f"Transaction {transaction_reference} still pending "
                         f"(ResponseCode 1001: TXN UPLOADED - waiting for payment completion)"
@@ -1015,17 +1031,17 @@ class PineLabsClient:
                 # For declined, only mark if we have completion data (definitive decline)
                 # This prevents marking as declined while terminal is initializing
                 if has_completion_data:
-                    log.status = "Declined"
-                    log.completed_at = now_datetime()
-                    log.error_code = str(response_code)
-                    log.error_message = status_data.get("ResponseMessage", _("Transaction declined"))
+                    updates["status"] = "Declined"
+                    updates["completed_at"] = now_datetime()
+                    updates["error_code"] = str(response_code)
+                    updates["error_message"] = status_data.get("ResponseMessage", _("Transaction declined"))
                 # If no completion data, keep as Pending (might be terminal initialization)
             else:
                 # For other response codes or None, check if we have completion data
                 # If RRN/ApprovalCode present, payment is likely approved (common with UPI)
                 if has_completion_data:
-                    log.status = "Approved"
-                    log.completed_at = now_datetime()
+                    updates["status"] = "Approved"
+                    updates["completed_at"] = now_datetime()
                     frappe.logger().info(
                         f"Transaction {transaction_reference} marked as Approved "
                         f"(ResponseCode={response_code} but has RRN/ApprovalCode - payment completed)"
@@ -1033,26 +1049,26 @@ class PineLabsClient:
                 # Otherwise keep status as Pending
 
             # Update transaction details (always update these, but preserve existing if new is empty)
-            log.rrn = status_data.get("RRN", "") or log.rrn
-            log.approval_code = status_data.get("ApprovalCode", "") or log.approval_code
-            log.external_reference = status_data.get("PlutusTransactionReferenceID", "") or log.external_reference
+            updates["rrn"] = status_data.get("RRN", "") or log.rrn
+            updates["approval_code"] = status_data.get("ApprovalCode", "") or log.approval_code
+            updates["external_reference"] = status_data.get("PlutusTransactionReferenceID", "") or log.external_reference
 
             # Update card details if available
             if log.payment_mode == "Card":
-                log.card_number = status_data.get("CardNumber", "")
-                log.card_type = status_data.get("CardType", "")
-                log.card_holder_name = status_data.get("CardHolderName", "")
-                log.bank_name = status_data.get("BankName", "")
+                updates["card_number_masked"] = status_data.get("CardNumber", "") or log.card_number_masked
+                updates["card_type"] = status_data.get("CardType", "") or log.card_type
+                updates["card_holder_name"] = status_data.get("CardHolderName", "") or log.card_holder_name
+                updates["bank_name"] = status_data.get("BankName", "") or log.bank_name
 
             # Update response payload
-            log.response_payload = json.dumps(status_data, indent=2)
-            log.updated_at = now_datetime()
+            updates["response_payload"] = json.dumps(status_data, indent=2)
+            updates["updated_at"] = now_datetime()
 
-            log.save(ignore_permissions=True)
+            frappe.db.set_value("Pinelabs Transaction Log", log.name, updates, update_modified=True)
             frappe.db.commit()
-            
-            # Return the updated log to avoid duplicate reads
-            return log
+
+            # Return the updated log to avoid stale in-memory timestamps under webhook/poll races.
+            return frappe.get_doc("Pinelabs Transaction Log", log.name)
 
         except Exception as e:
             frappe.logger().error(f"Error updating transaction log: {str(e)}")
