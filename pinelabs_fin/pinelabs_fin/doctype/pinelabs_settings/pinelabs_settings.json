@@ -76,7 +76,7 @@
    "label": "Advanced Settings"
   },
   {
-   "description": "Auto-cancel pending transactions after specified minutes (default: 3)",
+   "description": "Auto-cancel pending transactions after this many minutes (sent to Pine Labs as AutoCancelDurationInMinutes). Used when machine row override is 0 or empty. If unset or 0, default is 3.",
    "fieldname": "auto_cancel_duration_minutes",
    "fieldtype": "Int",
    "label": "Auto Cancel Duration (Minutes)"

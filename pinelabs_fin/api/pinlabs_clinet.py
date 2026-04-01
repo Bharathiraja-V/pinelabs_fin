@@ -10,7 +10,7 @@ import hashlib
 import uuid
 from datetime import datetime
 from frappe import _
-from frappe.utils import get_datetime, now_datetime, get_url
+from frappe.utils import cint, get_datetime, now_datetime, get_url
 
 
 class PineLabsClient:
@@ -127,7 +127,16 @@ class PineLabsClient:
         self.client_id = machine.client_id
         self.store_id = machine.store_id
         self.device_number = machine.device_number or ""
-        self.auto_cancel_duration = getattr(machine, 'auto_cancel_duration_in_minutes', 3)
+        # Auto-cancel: per-machine override > Pinelabs Settings > default 3
+        machine_mins = getattr(machine, "auto_cancel_duration_in_minutes", None)
+        if machine_mins is not None and cint(machine_mins) > 0:
+            self.auto_cancel_duration = cint(machine_mins)
+        else:
+            settings_mins = getattr(self.settings, "auto_cancel_duration_minutes", None)
+            if settings_mins is not None and cint(settings_mins) > 0:
+                self.auto_cancel_duration = cint(settings_mins)
+            else:
+                self.auto_cancel_duration = 3
 
         # Validate required credentials
         if not all([self.merchant_id, self.security_token, self.client_id, self.store_id]):
@@ -322,7 +331,7 @@ class PineLabsClient:
         amount_in_paisa = int(float(amount) * 100)
         
         # Get auto-cancel duration (from machine or settings)
-        auto_cancel_duration = getattr(self, 'auto_cancel_duration', 3)
+        auto_cancel_duration = getattr(self, 'auto_cancel_duration', 1)
         
         payload = {
             "MerchantID": str(self.merchant_id),

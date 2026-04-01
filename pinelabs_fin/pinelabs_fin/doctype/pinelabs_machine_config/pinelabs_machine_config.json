@@ -13,6 +13,7 @@
   "security_token",
   "store_id",
   "device_number",
+  "auto_cancel_duration_in_minutes",
   "enabled",
   "description"
  ],
@@ -70,6 +71,13 @@
    "fieldname": "device_number",
    "fieldtype": "Data",
    "label": "Device Number"
+  },
+  {
+   "description": "Override auto-cancel minutes for this machine; leave 0 to use Pinelabs Settings value",
+   "fieldname": "auto_cancel_duration_in_minutes",
+   "fieldtype": "Int",
+   "label": "Auto Cancel (Minutes) Override",
+   "non_negative": 1
   },
   {
    "default": "0",
