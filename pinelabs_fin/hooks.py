@@ -5,6 +5,10 @@ app_description = "pine"
 app_email = "pinelab12@gmail.com"
 app_license = "mit"
 
+fin_pos_terminal_payment_handlers = [
+	"pinelabs_fin.api.fin_pos_terminal_handler.PinelabsFinPosTerminalHandler"
+]
+
 # Apps
 # ------------------
 
@@ -246,4 +250,3 @@ app_license = "mit"
 # ------------
 # List of apps whose translatable strings should be excluded from this app's translations.
 # ignore_translatable_strings_from = []
-
