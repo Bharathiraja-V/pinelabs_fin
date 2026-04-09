@@ -5,10 +5,6 @@ app_description = "pine"
 app_email = "pinelab12@gmail.com"
 app_license = "mit"
 
-fin_pos_terminal_payment_handlers = [
-	"pinelabs_fin.api.fin_pos_terminal_handler.PinelabsFinPosTerminalHandler"
-]
-
 # Apps
 # ------------------
 
@@ -30,7 +26,9 @@ fin_pos_terminal_payment_handlers = [
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/pinelabs_fin/css/pinelabs_fin.css"
-# app_include_js = "/assets/pinelabs_fin/js/pinelabs_fin.js"
+# Shared PineLabs helper is loaded globally, but doctype trigger ownership
+# remains outside the app until the MOP entry point is finalized.
+app_include_js = "/assets/pinelabs_fin/js/pinelabs_payment.js"
 
 # include js, css files in header of web template
 # web_include_css = "/assets/pinelabs_fin/css/pinelabs_fin.css"
@@ -46,8 +44,6 @@ fin_pos_terminal_payment_handlers = [
 # include js in page
 # page_js = {"page" : "public/js/file.js"}
 
-# include js in doctype views
-# doctype_js = {"doctype" : "public/js/doctype.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}

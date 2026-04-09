@@ -6,6 +6,9 @@
  "engine": "InnoDB",
  "field_order": [
   "enabled",
+  "mode_of_payment",
+  "payment_modes_section",
+  "payment_modes",
   "machine_configurations_section",
   "machines",
   "section_break_odjq",
@@ -24,6 +27,28 @@
    "fieldname": "enabled",
    "fieldtype": "Check",
    "label": "Enabled"
+  },
+  {
+   "collapsible": 1,
+   "description": "(Legacy) Fallback Mode of Payment. Not needed if Payment Modes table below is configured.",
+   "fieldname": "mode_of_payment",
+   "fieldtype": "Link",
+   "hidden": 1,
+   "label": "Default Mode of Payment (Legacy)",
+   "options": "Mode of Payment"
+  },
+  {
+   "fieldname": "payment_modes_section",
+   "fieldtype": "Section Break",
+   "label": "Payment Modes"
+  },
+  {
+   "description": "Configure available Pine Labs payment modes (e.g., Card, UPI). Each mode maps to an ERPNext Mode of Payment and a Pine Labs API code.",
+   "fieldname": "payment_modes",
+   "fieldtype": "Table",
+   "label": "Payment Modes",
+   "options": "Pinelabs Payment Mode",
+   "reqd": 1
   },
   {
    "fieldname": "machine_configurations_section",
@@ -86,7 +111,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-03-30 19:44:48.906862",
+ "modified": "2026-04-07 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Pinelabs Fin",
  "name": "Pinelabs Settings",

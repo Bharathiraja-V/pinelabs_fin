@@ -2,7 +2,6 @@ from __future__ import unicode_literals
 
 import frappe
 from frappe import _
-from frappe.utils import nowdate, nowtime
 
 
 class BaseHostAdapter:
@@ -92,70 +91,56 @@ class ERPNextAdapter(BaseHostAdapter):
 				),
 			}
 
-		if self.is_order_finalized(order_doc):
+		if not self.is_order_finalized(order_doc):
+			return {
+				"success": False,
+				"invoice_name": order_doc.name,
+				"invoice_doctype": order_doc.doctype,
+				"invoice_finalized": False,
+				"finalization_status": "invoice_not_submitted",
+				"error": _("Invoice must be submitted before payment can be recorded."),
+			}
+
+		if self.is_order_paid(order_doc):
 			return {
 				"success": True,
 				"invoice_name": order_doc.name,
 				"invoice_doctype": order_doc.doctype,
 				"invoice_finalized": True,
 				"finalization_status": "already_finalized",
-				"message": _("Invoice is already finalized."),
+				"message": _("Invoice is already fully paid."),
 			}
 
-		source_system = (transaction_log.source_system or "").strip().lower()
-		if source_system == "fin_pos":
-			return self._finalize_fin_pos_invoice(order_doc)
+		# Create Payment Entry via payment_bridge
+		from pinelabs_fin.api.payment_bridge import create_payment_entry
 
-		return {
-			"success": False,
-			"invoice_name": order_doc.name,
-			"invoice_doctype": order_doc.doctype,
-			"invoice_finalized": False,
-			"finalization_status": "failed",
-			"error": _("Unsupported source system: {0}.").format(
-				transaction_log.source_system or _("Unknown")
-			),
-		}
-
-	def _finalize_fin_pos_invoice(self, order_doc):
 		try:
-			if order_doc.docstatus == 0:
-				if order_doc.meta.has_field("posting_date"):
-					order_doc.posting_date = nowdate()
-				if order_doc.meta.has_field("posting_time"):
-					order_doc.posting_time = nowtime()
-				if order_doc.meta.has_field("set_posting_time"):
-					order_doc.set_posting_time = 1
-			order_doc.flags.ignore_permissions = True
-			order_doc.submit()
-			refreshed_doc = self.get_order_doc(order_doc.name, doctype=order_doc.doctype)
-			is_finalized = self.is_order_finalized(refreshed_doc)
-			return {
-				"success": bool(is_finalized),
-				"invoice_name": refreshed_doc.name if refreshed_doc else order_doc.name,
-				"invoice_doctype": refreshed_doc.doctype if refreshed_doc else order_doc.doctype,
-				"invoice_finalized": bool(is_finalized),
-				"finalization_status": "finalized" if is_finalized else "failed",
-				"message": _("Invoice finalized successfully."),
-				"error": None if is_finalized else _("Invoice was not finalized by FIN POS."),
-			}
-		except Exception as exc:
-			refreshed_doc = self.get_order_doc(order_doc.name, doctype=order_doc.doctype)
-			if refreshed_doc and self.is_order_finalized(refreshed_doc):
+			result = create_payment_entry(transaction_log.name)
+			if result.get("success"):
 				return {
 					"success": True,
-					"invoice_name": refreshed_doc.name,
-					"invoice_doctype": refreshed_doc.doctype,
+					"invoice_name": order_doc.name,
+					"invoice_doctype": order_doc.doctype,
 					"invoice_finalized": True,
-					"finalization_status": "already_finalized",
-					"message": _("Invoice is already finalized."),
+					"finalization_status": "finalized",
+					"payment_entry": result.get("payment_entry"),
+					"message": result.get("message"),
 				}
-			frappe.log_error(frappe.get_traceback(), "Pine Labs FIN POS Finalization Error")
 			return {
 				"success": False,
 				"invoice_name": order_doc.name,
 				"invoice_doctype": order_doc.doctype,
-				"invoice_finalized": False,
+				"invoice_finalized": True,
+				"finalization_status": "failed",
+				"error": result.get("error"),
+			}
+		except Exception as exc:
+			frappe.log_error(frappe.get_traceback(), "PineLabs Finalization Error")
+			return {
+				"success": False,
+				"invoice_name": order_doc.name,
+				"invoice_doctype": order_doc.doctype,
+				"invoice_finalized": True,
 				"finalization_status": "failed",
 				"error": str(exc),
 			}

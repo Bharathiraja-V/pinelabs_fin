@@ -85,115 +85,91 @@ def _get_active_endpoint_name(settings):
 
 
 @frappe.whitelist()
+def get_pinelabs_payment_modes():
+    """Return enabled PineLabs Mode of Payment rows from settings."""
+    from pinelabs_fin.api import services
+
+    if not services.is_pinelabs_enabled():
+        frappe.throw(_("Pine Labs integration is not enabled."))
+
+    payment_modes = services.get_all_enabled_pinelabs_modes()
+    if not payment_modes:
+        frappe.throw(
+            _("No enabled payment modes configured. Please set up payment modes in Pinelabs Settings.")
+        )
+
+    return payment_modes
+
+
+@frappe.whitelist()
+def get_trigger_context(doctype, docname=None, mode_of_payment=None, context=None):
+    """Return the PineLabs context for a source document."""
+    from pinelabs_fin.api import services
+    return services.evaluate_pinelabs_context(
+        doctype=doctype,
+        docname=docname,
+        mode_of_payment=mode_of_payment,
+        context=context,
+    )
+
+
+@frappe.whitelist()
 def initiate_payment(
     invoice_name,
     amount,
     payment_mode="Card",
+    allowed_payment_mode=None,
+    mode_of_payment=None,
     source_system=None,
     source_doctype=None,
     source_docname=None,
+    machine_name=None,
+    context=None,
 ):
-    """
-    Initiate Pine Labs payment transaction
-    Called from POSawesome frontend
+    """Validate the request and start PineLabs terminal payment."""
+    from pinelabs_fin.api import services
 
-    Args:
-        invoice_name: POS Invoice name
-        amount: Transaction amount
-        payment_mode: "Card" or "UPI"
-
-    Returns:
-        JSON response with transaction details
-    """
     try:
-        # POS-specific validations
         if not invoice_name:
+            return {"success": False, "error": _("Source document name is required")}
+
+        # Resolve source doctype if not provided
+        resolved_doctype = source_doctype
+        if not resolved_doctype or not frappe.db.exists(resolved_doctype, invoice_name):
+            if frappe.db.exists("Payment Entry", invoice_name):
+                resolved_doctype = "Payment Entry"
+            elif frappe.db.exists("POS Invoice", invoice_name):
+                resolved_doctype = "POS Invoice"
+            elif frappe.db.exists("Sales Invoice", invoice_name):
+                resolved_doctype = "Sales Invoice"
+
+        if not resolved_doctype:
             return {
                 "success": False,
-                "error": _("Invoice name is required")
+                "error": _("Source document {0} not found").format(invoice_name),
             }
 
-        # Verify invoice exists (check both POS Invoice and Sales Invoice)
-        invoice_doctype = source_doctype if source_doctype and frappe.db.exists(source_doctype, invoice_name) else None
-        if not invoice_doctype and frappe.db.exists("POS Invoice", invoice_name):
-            invoice_doctype = "POS Invoice"
-        if not invoice_doctype and frappe.db.exists("Sales Invoice", invoice_name):
-            invoice_doctype = "Sales Invoice"
-        if not invoice_doctype:
-            return {
-                "success": False,
-                "error": _("Invoice {0} not found").format(invoice_name)
-            }
+        # If mode_of_payment not provided, try to derive from payment_mode label
+        # (legacy compatibility)
+        if not mode_of_payment:
+            for pm in services.get_all_enabled_pinelabs_modes():
+                if pm["label"] == payment_mode:
+                    mode_of_payment = pm["mode_of_payment"]
+                    break
 
-        # Get invoice to verify amount and extract warehouse
-        invoice = frappe.get_doc(invoice_doctype, invoice_name)
-        amount = flt(amount)
-        if abs(invoice.grand_total - amount) > 0.01:  # Allow 1 paisa difference for rounding
-            frappe.logger().warning(
-                f"Amount mismatch for {invoice_name}: "
-                f"Requested {amount}, Invoice total {invoice.grand_total}"
-            )
-
-        # Get warehouse from invoice (for machine selection)
-        warehouse = _get_warehouse_from_invoice(invoice)
-
-        # Initialize Pine Labs client with warehouse (handles generic validations)
-        client = get_pinelabs_client(warehouse=warehouse)
-
-        # Initiate payment (client handles amount and payment_mode validation)
-        result = client.upload_billed_transaction(
-            invoice_name=invoice_name,
-            amount=amount,
-            payment_mode=payment_mode,
-            source_system=source_system or "fin_pos",
-            source_doctype=source_doctype or invoice_doctype,
-            source_docname=source_docname or invoice_name,
-            external_order_id=source_docname or invoice_name,
+        return services.handle_mode_of_payment_trigger(
+            doctype=resolved_doctype,
+            docname=invoice_name,
+            mode_of_payment=mode_of_payment,
+            amount=flt(amount),
+            machine_name=machine_name,
+            context=context,
         )
-
-        if result.get("success"):
-            frappe.logger().info(
-                f"Payment initiated successfully: {result.get('transaction_reference')} "
-                f"for invoice {invoice_name}, Response: {result.get('response_message', 'N/A')}"
-            )
-
-            return {
-                "success": True,
-                "transaction_reference": result.get("transaction_reference"),
-                "transaction_log": result.get("transaction_log"),
-                "message": _("Payment initiated. Please complete payment on terminal."),
-                "amount": amount,
-                "payment_mode": payment_mode,
-                "invoice_name": invoice_name,
-                "invoice_doctype": source_doctype or invoice_doctype,
-                "response_code": result.get("response_code"),
-                "response_message": result.get("response_message")
-            }
-        else:
-            error_msg = result.get("error", _("Failed to initiate payment"))
-            response_code = result.get("response_code")
-            
-            frappe.logger().error(
-                f"Payment initiation failed for {invoice_name}: {error_msg} "
-                f"(Response Code: {response_code})"
-            )
-
-            return {
-                "success": False,
-                "error": error_msg,
-                "transaction_reference": result.get("transaction_reference"),
-                "transaction_log": result.get("transaction_log"),
-                "response_code": response_code
-            }
 
     except Exception as e:
         frappe.logger().error(f"Error in initiate_payment: {str(e)}")
         frappe.log_error(frappe.get_traceback(), "Pine Labs Payment Initiation Error")
-
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        return {"success": False, "error": str(e)}
 
 
 def _get_transaction_log(transaction_reference):
@@ -271,12 +247,16 @@ def _build_status_response(
         "response_message": response_message,
         "amount": log.amount,
         "payment_mode": log.payment_mode,
+        "payment_mode_label": getattr(log, "payment_mode_label", None) or log.payment_mode,
+        "mode_of_payment": getattr(log, "mode_of_payment", None),
+        "allowed_payment_mode": getattr(log, "allowed_payment_mode", None),
         "source_system": log.source_system,
         "source_doctype": log.source_doctype,
         "source_docname": log.source_docname,
         "external_order_id": log.external_order_id or log.invoice,
         "rrn": getattr(log, "rrn", None),
         "approval_code": getattr(log, "approval_code", None),
+        "payment_entry": getattr(log, "payment_entry", None),
     }
 
 
@@ -284,7 +264,6 @@ def _build_status_response(
 def check_payment_status(transaction_reference):
     """
     Check Pine Labs payment transaction status
-    Called from POSawesome frontend
 
     Args:
         transaction_reference: Unique transaction reference
@@ -365,7 +344,6 @@ def check_payment_status(transaction_reference):
 def cancel_payment(transaction_reference):
     """
     Cancel Pine Labs payment transaction
-    Called from POSawesome frontend
 
     Args:
         transaction_reference: Unique transaction reference
@@ -445,7 +423,6 @@ def cancel_payment(transaction_reference):
 def get_payment_settings():
     """
     Get Pine Labs settings for frontend validation
-    Called from POSawesome frontend
 
     Returns:
         JSON response with settings
@@ -525,7 +502,7 @@ def test_credentials():
         test_payload = client._build_transaction_payload(
             test_transaction_ref, 
             0.01,  # Minimal test amount
-            "Card"
+            1
         )
         
         # Make the API call
@@ -627,464 +604,17 @@ def is_pinelabs_available():
 
 
 @frappe.whitelist()
-def update_invoice_payment_from_transaction(invoice_name, transaction_reference, mode_of_payment):
-    """
-    Update POS Invoice payment amount from approved Pinelabs transaction
-    Called from frontend after payment approval
-    
-    Args:
-        invoice_name: POS Invoice name
-        transaction_reference: Pinelabs transaction reference
-        mode_of_payment: Payment method name (e.g., "Credit Card", "UPI")
-    
-    Returns:
-        Updated invoice document
-    """
-    try:
-        # Verify transaction is approved
-        status_result = check_payment_status(transaction_reference)
-        
-        if not status_result.get("success"):
-            frappe.throw(_("Payment verification failed"))
-        
-        status = (status_result.get("status") or "").upper()
-        if status not in ["APPROVED", "APPROVED"]:
-            frappe.throw(_("Transaction {0} is not approved. Status: {1}").format(
-                transaction_reference, status
-            ))
-        
-        # Determine invoice doctype
-        invoice_doctype = None
-        if frappe.db.exists("POS Invoice", invoice_name):
-            invoice_doctype = "POS Invoice"
-        elif frappe.db.exists("Sales Invoice", invoice_name):
-            invoice_doctype = "Sales Invoice"
-        else:
-            frappe.throw(_("Invoice {0} not found").format(invoice_name))
-        
-        # Get invoice
-        invoice = frappe.get_doc(invoice_doctype, invoice_name)
-        
-        # Find payment method and update amount
-        payment_amount = flt(status_result.get("amount") or 0)
-        
-        # Determine payment mode type from mode_of_payment parameter
-        mode_of_payment_lower = (mode_of_payment or "").lower()
-        is_card = ("card" in mode_of_payment_lower or "credit card" in mode_of_payment_lower)
-        is_upi = "upi" in mode_of_payment_lower
-        
-        # First, clear all payment amounts (including Cash)
-        # Then set only the matching Card/UPI payment amount
-        payment_found = False
-        matched_payment = None
-        
-        for payment in invoice.payments:
-            payment_mode_lower = (payment.mode_of_payment or "").lower()
-            
-            # Try exact match first
-            if payment.mode_of_payment == mode_of_payment:
-                matched_payment = payment
-                payment_found = True
-            # If exact match fails, try flexible matching for Card/UPI
-            elif is_card and ("card" in payment_mode_lower or "credit card" in payment_mode_lower):
-                matched_payment = payment
-                payment_found = True
-            elif is_upi and "upi" in payment_mode_lower:
-                matched_payment = payment
-                payment_found = True
-            
-            # Clear payment amounts (will be set for matched payment below)
-            if payment != matched_payment:
-                payment.amount = 0
-                if hasattr(payment, 'base_amount') and payment.base_amount is not None:
-                    payment.base_amount = 0
-        
-        if not payment_found:
-            available_methods = ", ".join([p.mode_of_payment for p in invoice.payments if p.mode_of_payment])
-            frappe.logger().error(
-                f"Pinelabs: Payment method '{mode_of_payment}' not found in invoice {invoice_name}. "
-                f"Available payments: {[(p.mode_of_payment, p.amount) for p in invoice.payments]}"
-            )
-            frappe.throw(_("Payment method {0} not found in invoice. Available methods: {1}").format(
-                mode_of_payment, 
-                available_methods
-            ))
-        
-        # Set amount for matched payment
-        matched_payment.amount = payment_amount
-        if hasattr(matched_payment, 'base_amount') and matched_payment.base_amount is not None:
-            matched_payment.base_amount = payment_amount
-        # Store transaction reference in payment row (if field exists)
-        if hasattr(matched_payment, 'transaction_reference'):
-            matched_payment.transaction_reference = transaction_reference
-        
-        invoice.flags.ignore_permissions = True
-        invoice.save()
-        
-        return invoice.as_dict()
-        
-    except Exception as e:
-        frappe.log_error(frappe.get_traceback(), "Update Invoice Payment Error")
-        frappe.throw(_("Failed to update invoice payment: {0}").format(str(e)))
-
-
-@frappe.whitelist()
-def validate_pinelabs_payment_before_submit(invoice_name, payment_methods):
-    """
-    Validate Pinelabs payment status before invoice submission
-    Called from frontend before submitting invoice
-    
-    Args:
-        invoice_name: Invoice name (POS Invoice or Sales Invoice)
-        payment_methods: List of payment methods with transaction references
-        
-    Returns:
-        Dictionary with validation result
-    """
-    try:
-        # Determine invoice doctype
-        invoice_doctype = None
-        if frappe.db.exists("POS Invoice", invoice_name):
-            invoice_doctype = "POS Invoice"
-        elif frappe.db.exists("Sales Invoice", invoice_name):
-            invoice_doctype = "Sales Invoice"
-        else:
-            return {
-                "valid": False,
-                "error": _("Invoice {0} not found").format(invoice_name)
-            }
-        
-        # Parse payment methods if string
-        if isinstance(payment_methods, str):
-            import json
-            payment_methods = json.loads(payment_methods)
-        
-        # Check each payment method
-        for payment in payment_methods or []:
-            mode_of_payment = payment.get("mode_of_payment", "")
-            transaction_reference = payment.get("transaction_reference")
-            amount = flt(payment.get("amount") or 0)
-            
-            # Check if this is a Pinelabs payment (Card/UPI)
-            mode_lower = (mode_of_payment or "").lower()
-            is_pinelabs_payment = (
-                "card" in mode_lower or 
-                "credit card" in mode_lower or 
-                "upi" in mode_lower
-            )
-            
-            if is_pinelabs_payment and amount > 0:
-                # Must have transaction reference
-                if not transaction_reference:
-                    return {
-                        "valid": False,
-                        "error": _("Please complete the payment process for {0} before submitting.").format(mode_of_payment),
-                        "payment_method": mode_of_payment
-                    }
-                
-                # Check transaction status
-                status_result = check_payment_status(transaction_reference)
-                
-                if not status_result.get("success"):
-                    return {
-                        "valid": False,
-                        "error": _("Failed to verify payment status for {0}").format(mode_of_payment),
-                        "payment_method": mode_of_payment
-                    }
-                
-                status = (status_result.get("status") or "").upper()
-                
-                # Block submit if cancelled
-                if status in ["CANCELLED", "CANCEL"]:
-                    return {
-                        "valid": False,
-                        "error": _("Payment initiated was cancelled. Cannot submit invoice. Please use a different payment method."),
-                        "payment_method": mode_of_payment,
-                        "status": status
-                    }
-                
-                # Block submit if not approved
-                if status != "APPROVED":
-                    return {
-                        "valid": False,
-                        "error": _("Payment is not approved yet. Please wait for payment approval."),
-                        "payment_method": mode_of_payment,
-                        "status": status
-                    }
-        
-        # All validations passed
-        return {
-            "valid": True,
-            "message": _("All payments validated successfully")
+def get_available_machines():
+    """Return list of enabled PineLabs machines for frontend machine selector."""
+    settings = frappe.get_single("Pinelabs Settings")
+    if not settings.enabled:
+        return []
+    return [
+        {
+            "machine_name": m.machine_name,
+            "warehouse": m.warehouse,
+            "description": m.description,
         }
-        
-    except Exception as e:
-        frappe.log_error(frappe.get_traceback(), "Validate Pinelabs Payment Error")
-        return {
-            "valid": False,
-            "error": _("Error validating payment: {0}").format(str(e))
-        }
-
-
-@frappe.whitelist()
-def submit_pos_invoice_from_transaction_log(invoice_name):
-    """
-    Submit POS Invoice if there's an approved Pine Labs transaction log OR if invoice has Card/UPI payments.
-    This ensures POS Invoice is submitted directly (not Sales Invoice) to avoid Payment Entry reference_doctype errors.
-    
-    Args:
-        invoice_name: POS Invoice name
-        
-    Returns:
-        JSON response with submission status
-    """
-    try:
-        # Check if invoice exists (try both POS Invoice and Sales Invoice)
-        invoice_doctype = None
-        if frappe.db.exists("POS Invoice", invoice_name):
-            invoice_doctype = "POS Invoice"
-        elif frappe.db.exists("Sales Invoice", invoice_name):
-            invoice_doctype = "Sales Invoice"
-        else:
-            return {
-                "success": False,
-                "error": _("Invoice {0} not found").format(invoice_name)
-            }
-        
-        # Get the invoice document to check for Card/UPI payments
-        invoice_doc = frappe.get_doc(invoice_doctype, invoice_name)
-        
-        # Check if invoice has Card or UPI payments
-        has_card_or_upi_payment = False
-        if invoice_doc.get("payments"):
-            for payment in invoice_doc.payments:
-                if payment.get("amount") and flt(payment.get("amount")) > 0:
-                    payment_mode = (payment.get("mode_of_payment") or "").lower()
-                    if "card" in payment_mode or "credit card" in payment_mode or "upi" in payment_mode:
-                        has_card_or_upi_payment = True
-                        break
-        
-        # First, check for cancelled transaction logs - if found, block submission
-        cancelled_logs = frappe.get_all(
-            "Pinelabs Transaction Log",
-            filters={
-                "invoice": invoice_name,
-                "status": "Cancelled"
-            },
-            fields=["name", "status", "amount", "payment_mode", "transaction_reference"],
-            limit=1,
-            order_by="creation desc"
-        )
-        
-        if cancelled_logs and has_card_or_upi_payment:
-            # Transaction was cancelled but invoice still has Card/UPI payment amount
-            # Clear the payment amount and return error
-            cancelled_log = cancelled_logs[0]
-            return {
-                "success": False,
-                "error": _("Payment initiated was cancelled. Cannot submit invoice. Please change the payment method or try again."),
-                "cancelled": True,
-                "transaction_reference": cancelled_log.transaction_reference
-            }
-        
-        # Check for approved or pending transaction log for this invoice
-        transaction_logs = frappe.get_all(
-            "Pinelabs Transaction Log",
-            filters={
-                "invoice": invoice_name,
-                "status": ["in", ["Approved", "Pending"]]
-            },
-            fields=["name", "status", "amount", "payment_mode"],
-            limit=1,
-            order_by="creation desc"
-        )
-        
-        # If invoice is Sales Invoice, we cannot submit it directly as it will cause Payment Entry errors
-        # Only POS Invoice can be submitted directly without Payment Entry reference_doctype issues
-        if invoice_doctype == "Sales Invoice":
-            # If it's Sales Invoice, we need to check if it should have been POS Invoice
-            # But we can't convert it here, so we return should_use_regular_submit
-            # However, this will cause the Payment Entry error
-            # The real fix is to ensure invoice is created as POS Invoice from the start
-            return {
-                "success": False,
-                "error": _("Invoice {0} is Sales Invoice. Cannot submit directly with Card/UPI payment.").format(invoice_name),
-                "should_use_regular_submit": True
-            }
-        
-        # If no transaction log AND no Card/UPI payment, use regular submit
-        if not transaction_logs and not has_card_or_upi_payment:
-            return {
-                "success": False,
-                "error": _("No Pine Labs transaction or Card/UPI payment found for invoice {0}").format(invoice_name),
-                "should_use_regular_submit": True
-            }
-        
-        # At this point, we have POS Invoice with Card/UPI payment or transaction log
-        # Submit it directly without going through regular submit_invoice flow
-        
-        # Check if already submitted
-        if invoice_doc.docstatus == 1:
-            return {
-                "success": True,
-                "message": _("Invoice {0} is already submitted").format(invoice_name),
-                "name": invoice_doc.name,
-                "status": invoice_doc.docstatus
-            }
-        
-        # Update payment amounts based on transaction log or Card/UPI payments
-        # This ensures the correct payment method (Card/UPI) has the amount, not Cash
-        if transaction_logs:
-            transaction_log = transaction_logs[0]
-            transaction_amount = flt(transaction_log.amount)
-            transaction_mode = (transaction_log.payment_mode or "").lower()
-            
-            # First, check if any Card/UPI payment already has the correct amount
-            # If so, just ensure other Card/UPI payments are reset (preserve Cash)
-            payment_already_set = False
-            for payment in invoice_doc.payments:
-                payment_mode_lower = (payment.mode_of_payment or "").lower()
-                is_card_or_upi = ("card" in payment_mode_lower or 
-                                  "credit card" in payment_mode_lower or 
-                                  "upi" in payment_mode_lower)
-                
-                if is_card_or_upi and flt(payment.amount) == transaction_amount:
-                    # Payment already correctly set - just reset other Card/UPI payments
-                    payment_already_set = True
-                    for other_payment in invoice_doc.payments:
-                        if other_payment != payment:
-                            other_payment_mode_lower = (other_payment.mode_of_payment or "").lower()
-                            # Only reset other Card/UPI payments, keep Cash and other methods
-                            if ("card" in other_payment_mode_lower or 
-                                "credit card" in other_payment_mode_lower or 
-                                "upi" in other_payment_mode_lower):
-                                other_payment.amount = 0
-                                if hasattr(other_payment, 'base_amount') and other_payment.base_amount is not None:
-                                    other_payment.base_amount = 0
-                    break
-            
-            # If payment not already set, find and set the matching payment method
-            if not payment_already_set:
-                payment_found = False
-                for payment in invoice_doc.payments:
-                    payment_mode_lower = (payment.mode_of_payment or "").lower()
-                    
-                    # Check if this payment matches the transaction log payment mode
-                    is_card_match = (transaction_mode == "card" and 
-                                    ("card" in payment_mode_lower or "credit card" in payment_mode_lower))
-                    is_upi_match = (transaction_mode == "upi" and "upi" in payment_mode_lower)
-                    
-                    if is_card_match or is_upi_match:
-                        # Set amount for matching payment
-                        payment.amount = transaction_amount
-                        if hasattr(payment, 'base_amount') and payment.base_amount is not None:
-                            payment.base_amount = transaction_amount
-                        payment_found = True
-                        
-                        # Reset other Card/UPI payments to 0 (but keep Cash and other non-Card/UPI payments)
-                        for other_payment in invoice_doc.payments:
-                            if other_payment != payment:
-                                other_payment_mode_lower = (other_payment.mode_of_payment or "").lower()
-                                # Only reset Card/UPI payments, not Cash or other payment methods
-                                if ("card" in other_payment_mode_lower or 
-                                    "credit card" in other_payment_mode_lower or 
-                                    "upi" in other_payment_mode_lower):
-                                    other_payment.amount = 0
-                                    if hasattr(other_payment, 'base_amount') and other_payment.base_amount is not None:
-                                        other_payment.base_amount = 0
-                        break
-                
-                # If no matching payment found, check if there's already a Card/UPI payment with correct amount
-                if not payment_found:
-                    # Check if any Card/UPI payment already has the correct amount
-                    for payment in invoice_doc.payments:
-                        payment_mode_lower = (payment.mode_of_payment or "").lower()
-                        is_card_or_upi = ("card" in payment_mode_lower or 
-                                          "credit card" in payment_mode_lower or 
-                                          "upi" in payment_mode_lower)
-                        
-                        if is_card_or_upi and flt(payment.amount) == transaction_amount:
-                            # Payment already correctly set, just reset other Card/UPI payments
-                            payment_found = True
-                            for other_payment in invoice_doc.payments:
-                                if other_payment != payment:
-                                    other_payment_mode_lower = (other_payment.mode_of_payment or "").lower()
-                                    if ("card" in other_payment_mode_lower or 
-                                        "credit card" in other_payment_mode_lower or 
-                                        "upi" in other_payment_mode_lower):
-                                        other_payment.amount = 0
-                                        if hasattr(other_payment, 'base_amount') and other_payment.base_amount is not None:
-                                            other_payment.base_amount = 0
-                            break
-                    
-                    # If still not found, log warning but don't reset existing payments
-                    if not payment_found:
-                        frappe.logger().warning(
-                            f"Pinelabs: No matching payment method found for transaction log. "
-                            f"Transaction mode: '{transaction_log.payment_mode}', Amount: {transaction_amount}. "
-                            f"Invoice payments: {[(p.mode_of_payment, p.amount) for p in invoice_doc.payments]}. "
-                            f"Keeping existing payment amounts."
-                        )
-        elif has_card_or_upi_payment:
-            # If no transaction log but has Card/UPI payment, ensure only that payment has amount
-            # Reset only other Card/UPI payments, keep Cash and other non-Card/UPI payments
-            for payment in invoice_doc.payments:
-                payment_mode_lower = (payment.mode_of_payment or "").lower()
-                is_card_or_upi = ("card" in payment_mode_lower or 
-                                  "credit card" in payment_mode_lower or 
-                                  "upi" in payment_mode_lower)
-                
-                if not is_card_or_upi:
-                    # For non-Card/UPI payments, only reset if they're not Cash
-                    is_cash = payment_mode_lower == "cash" or "cash" in payment_mode_lower
-                    if not is_cash and flt(payment.amount) > 0:
-                        payment.amount = 0
-                        if hasattr(payment, 'base_amount') and payment.base_amount is not None:
-                            payment.base_amount = 0
-                # Keep Card/UPI payment amounts as they are (already set in frontend)
-        
-        # Import necessary functions from posawesome
-        from posawesome.posawesome.api.invoices import (
-            _deduplicate_free_items,
-            _apply_item_name_overrides,
-            _auto_set_return_batches,
-            set_batch_nos_for_bundels,
-            _validate_stock_on_invoice,
-        )
-        
-        # Apply necessary updates
-        _deduplicate_free_items(invoice_doc)
-        _apply_item_name_overrides(invoice_doc)
-        _auto_set_return_batches(invoice_doc)
-        set_batch_nos_for_bundels(invoice_doc, "warehouse", throw=True)
-        _validate_stock_on_invoice(invoice_doc)
-        
-        # Set flags and save
-        invoice_doc.flags.ignore_permissions = True
-        frappe.flags.ignore_account_permission = True
-        invoice_doc.posa_is_printed = 1
-        invoice_doc.save()
-        
-        # Submit the invoice
-        invoice_doc.submit()
-        
-        frappe.logger().info(
-            f"POS Invoice {invoice_name} submitted successfully via transaction log"
-        )
-        
-        return {
-            "success": True,
-            "message": _("POS Invoice {0} submitted successfully").format(invoice_name),
-            "name": invoice_doc.name,
-            "status": invoice_doc.docstatus,
-            "doctype": invoice_doc.doctype
-        }
-        
-    except Exception as e:
-        frappe.logger().error(f"Error submitting POS Invoice from transaction log: {str(e)}")
-        frappe.log_error(frappe.get_traceback(), "Submit POS Invoice from Transaction Log Error")
-        
-        return {
-            "success": False,
-            "error": str(e)
-        }
+        for m in (settings.machines or [])
+        if m.enabled
+    ]

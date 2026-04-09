@@ -313,17 +313,16 @@ class PineLabsClient:
         except Exception as e:
             return self._handle_request_exception(e)
 
-    def _build_transaction_payload(self, transaction_ref, amount, payment_mode):
+    def _build_transaction_payload(self, transaction_ref, amount, allowed_payment_mode):
         """
         Build request payload for transaction upload
-        
+
         Note: Pine Labs API expects:
         - Amount in paisa (smallest currency unit for INR) as integer
         - Example: 159.00 INR = 15900 paisa
         - SequenceNumber as integer
-        - AllowedPaymentMode: 1=Card, 11=UPI
+        - AllowedPaymentMode: integer code from settings (e.g., 1=Card, 11=UPI)
         """
-        allowed_payment_mode = 1 if payment_mode == "Card" else 11
         
         # Pine Labs API expects amount in paisa (smallest currency unit)
         # Convert rupees to paisa: multiply by 100
@@ -362,7 +361,7 @@ class PineLabsClient:
         # Log the payload for debugging
         frappe.logger().info(
             f"Pine Labs Payload - Amount: {amount} INR = {amount_in_paisa} paisa, "
-            f"Mode: {payment_mode}, AutoCancel: {auto_cancel_duration} min"
+            f"AllowedPaymentMode: {allowed_payment_mode}, AutoCancel: {auto_cancel_duration} min"
         )
         
         return payload
@@ -475,26 +474,26 @@ class PineLabsClient:
                 "response_message": response_message
             }
 
-    def _validate_payment_inputs(self, amount, payment_mode):
+    def _validate_payment_inputs(self, amount, allowed_payment_mode):
         """
         Validate generic payment inputs (not POS-specific)
-        
+
         Args:
             amount: Transaction amount
-            payment_mode: "Card" or "UPI"
-            
+            allowed_payment_mode: Pine Labs API AllowedPaymentMode code (int)
+
         Returns:
             Tuple (is_valid, error_message)
         """
         from frappe.utils import flt
-        
+
         amount = flt(amount)
         if amount <= 0:
             return False, _("Invalid amount. Amount must be greater than 0")
-        
-        if payment_mode not in ["Card", "UPI"]:
-            return False, _("Invalid payment mode. Must be 'Card' or 'UPI'")
-        
+
+        if not allowed_payment_mode or cint(allowed_payment_mode) <= 0:
+            return False, _("Invalid payment mode code. Please select a valid payment mode.")
+
         return True, None
 
     def upload_billed_transaction(
@@ -502,6 +501,8 @@ class PineLabsClient:
         invoice_name,
         amount,
         payment_mode="Card",
+        allowed_payment_mode=None,
+        mode_of_payment=None,
         source_system=None,
         source_doctype=None,
         source_docname=None,
@@ -513,7 +514,9 @@ class PineLabsClient:
         Args:
             invoice_name: Invoice name (can be POS Invoice or any identifier)
             amount: Transaction amount
-            payment_mode: "Card" or "UPI"
+            payment_mode: Payment mode label (e.g., "Card", "UPI")
+            allowed_payment_mode: Pine Labs API AllowedPaymentMode code (int)
+            mode_of_payment: ERPNext Mode of Payment name (e.g., "PineLabs - Card")
             source_system: Host application name (example: ERPNext)
             source_doctype: Source document type in host app
             source_docname: Source document name in host app
@@ -522,16 +525,22 @@ class PineLabsClient:
         Returns:
             Dictionary with transaction details
         """
+        # Backward compat: derive allowed_payment_mode from label if not provided
+        if allowed_payment_mode is None:
+            allowed_payment_mode = 11 if payment_mode == "UPI" else 1
+        else:
+            allowed_payment_mode = cint(allowed_payment_mode)
+
         # Validate generic inputs
-        is_valid, error_msg = self._validate_payment_inputs(amount, payment_mode)
+        is_valid, error_msg = self._validate_payment_inputs(amount, allowed_payment_mode)
         if not is_valid:
             return {
                 "success": False,
                 "error": error_msg
             }
-        
+
         transaction_ref = self._generate_transaction_reference()
-        payload = self._build_transaction_payload(transaction_ref, amount, payment_mode)
+        payload = self._build_transaction_payload(transaction_ref, amount, allowed_payment_mode)
 
         endpoint = self.upload_endpoint
         response = self._make_request(endpoint, payload)
@@ -541,6 +550,9 @@ class PineLabsClient:
             invoice=invoice_name,
             amount=amount,
             payment_mode=payment_mode,
+            allowed_payment_mode=allowed_payment_mode,
+            mode_of_payment=mode_of_payment,
+            payment_mode_label=payment_mode,
             request_payload=payload,
             response_payload=response.get("data", {}),
             status="Pending",
@@ -926,6 +938,9 @@ class PineLabsClient:
         response_payload,
         status,
         machine_name=None,
+        allowed_payment_mode=None,
+        mode_of_payment=None,
+        payment_mode_label=None,
         source_system=None,
         source_doctype=None,
         source_docname=None,
@@ -938,11 +953,14 @@ class PineLabsClient:
             transaction_reference: Unique transaction ID
             invoice: POS Invoice name
             amount: Transaction amount
-            payment_mode: Card or UPI
+            payment_mode: Payment mode label (e.g., Card, UPI)
             request_payload: API request data
             response_payload: API response data
             status: Transaction status
             machine_name: Optional machine name
+            allowed_payment_mode: Pine Labs API AllowedPaymentMode code
+            mode_of_payment: ERPNext Mode of Payment name
+            payment_mode_label: Display label for the payment mode
             source_system: Host system (example: ERPNext)
             source_doctype: Source document type in host system
             source_docname: Source document name in host system
@@ -951,12 +969,18 @@ class PineLabsClient:
         Returns:
             Transaction Log document
         """
+        # Only set legacy invoice field for POS Invoices (it's a Link to POS Invoice)
+        invoice_value = invoice if source_doctype == "POS Invoice" else None
+
         log = frappe.get_doc({
             "doctype": "Pinelabs Transaction Log",
             "transaction_reference": transaction_reference,
-            "invoice": invoice,
+            "invoice": invoice_value,
             "amount": amount,
             "payment_mode": payment_mode,
+            "allowed_payment_mode": allowed_payment_mode,
+            "mode_of_payment": mode_of_payment,
+            "payment_mode_label": payment_mode_label or payment_mode,
             "status": status,
             "machine_name": machine_name,
             "merchant_id": self.merchant_id,
@@ -964,7 +988,7 @@ class PineLabsClient:
             "source_system": source_system,
             "source_doctype": source_doctype,
             "source_docname": source_docname,
-            "external_order_id": external_order_id or invoice,
+            "external_order_id": external_order_id or source_docname or invoice,
             "request_payload": json.dumps(request_payload, indent=2),
             "response_payload": json.dumps(response_payload, indent=2),
             "created_at": now_datetime(),
