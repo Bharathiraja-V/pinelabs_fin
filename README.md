@@ -18,28 +18,33 @@ bench install-app pinelabs_fin
 
 Current responsibility of the app:
 
-1. Detect whether a document is eligible for Pine Labs payment.
-2. Expose a shared Mode-of-Payment-facing flow that can start a terminal payment request when called explicitly.
-3. Store request/response data in `Pinelabs Transaction Log`.
-4. Poll Pine Labs for status or receive a webhook callback.
-5. Update the transaction log with the terminal response.
-6. Finalize the business flow in ERPNext by creating a `Payment Entry` when applicable.
+1. Read the configurable `Payable Doctypes` child table in `Pinelabs Settings` to decide where built-in Pinelabs pay buttons appear on ERPNext and custom Frappe forms.
+2. Expose a shared, API-first Pine Labs payment flow that can be used by built-in form buttons, custom pages, or external apps.
+3. Validate source-document eligibility through `get_trigger_context` before terminal payment starts.
+4. Store request and response data in `Pinelabs Transaction Log`.
+5. Poll Pine Labs for status or receive a webhook callback.
+6. Update the transaction log with terminal response and reconciliation data.
+7. Finalize the document either through standard ERPNext `Payment Entry` creation or through mapped field updates, depending on the configured payable-doctype row.
 
 ## 2. Where This App Works
 
 Current frontend asset:
 
 1. Shared helper script loaded globally on Desk through `app_include_js`
+2. Dynamic form-button injector loaded globally on Desk through `app_include_js`
 
 Current app-owned trigger point:
 
-1. None. The app does not currently bind itself to any doctype event or custom button.
+1. Built-in form toolbar buttons configured through `Pine Labs Settings > Payable Doctypes`
+2. Explicit shared-helper calls from custom scripts or external apps
 
-Current supported backend source documents:
+Current standard fallback source documents for direct API callers:
 
 1. `Sales Invoice`
 2. `POS Invoice`
 3. `Payment Entry`
+
+Custom doctypes can be used by adding an enabled row in `Pine Labs Settings > Payable Doctypes` with an amount field, status mapping, and finalization mode.
 
 Current shared frontend API:
 
@@ -55,28 +60,29 @@ Current backend integration points:
 3. Payment status polling
 4. Payment cancellation
 5. Webhook processing
-6. ERPNext finalization and Payment Entry creation
+6. ERPNext finalization through Payment Entry creation or mapped field updates
 
 ## 3. Frontend Behavior
 
-Current frontend behavior is trigger-agnostic.
+Current frontend behavior supports both built-in form buttons and explicit callers.
 
 Current event path:
 
-1. An explicit caller invokes the shared PineLabs Mode-of-Payment helper.
-2. Frontend checks whether the provided mode is a PineLabs mode.
-3. Frontend calls `get_trigger_context`.
-4. Backend validates whether the document is eligible for PineLabs.
-5. If valid, frontend starts PineLabs terminal payment.
-6. Frontend opens polling dialog.
-7. Frontend continues status/cancel/success flow.
+1. User clicks a configured Pinelabs form button, or another caller invokes the shared PineLabs helper explicitly.
+2. Frontend resolves the active PineLabs payment modes.
+3. If multiple modes are active, frontend opens a picker such as `Card` or `UPI`.
+4. Frontend calls `get_trigger_context`.
+5. Backend validates whether the document is eligible for PineLabs.
+6. If valid, frontend starts PineLabs terminal payment.
+7. Frontend opens polling dialog.
+8. Frontend continues status/cancel/success flow.
 
 Important note:
 
-- Current code does not choose a doctype event or UI widget as the trigger.
-- Current code does not show PineLabs trigger buttons.
-- Current code does not attach any active `doctype_js` integration.
-- Current code validates first, then starts terminal communication when called explicitly.
+- Built-in trigger buttons are injected through global Desk JS, not through `doctype_js`.
+- Built-in button rows are configured in `Pine Labs Settings > Payable Doctypes`.
+- External callers can still render their own button and invoke the same shared APIs directly.
+- Current code validates first through `get_trigger_context`, then starts terminal communication.
 - Status, cancel, webhook, and finalization flows continue through the same backend APIs.
 
 ## 4. End-to-End Flow
@@ -92,7 +98,7 @@ Important note:
    - is document valid
    - is amount payable
    - is document not cancelled
-   - is the source document one of the currently supported payable-flow doctypes
+   - if a payable-doctype row exists, whether the document matches the configured docstatus and field mapping
 4. Backend returns trigger context.
 5. The caller decides whether to continue into payment initiation.
 
@@ -145,28 +151,31 @@ Important note:
 
 1. Transaction becomes `Approved`.
 2. App resolves source document from transaction log.
-3. App checks that source document exists and is submitted.
-4. App checks outstanding amount.
+3. App checks that source document exists and is eligible for the configured finalization path.
+4. App reads the payable amount from the configured `amount_field` when a payable-doctype row exists, otherwise it uses the standard fallback logic.
 5. App resolves ERPNext `mode_of_payment`.
 6. App resolves bank account from `Mode of Payment Account`.
-7. App creates ERPNext `Payment Entry`.
-8. App links that `Payment Entry` back to the transaction log.
+7. If `Create Payment Entry` is checked, app attempts ERPNext `Payment Entry` creation for source flows that finalize through the standard accounting path.
+8. If `Create Payment Entry` is unchecked, app treats `status_field == paid_status_value` as the mapped paid-state check and writes the configured mapped fields on the source document after approval.
+9. In mapped finalization, if `paid_status_value` is `Submitted` and the source doctype is submittable, app submits the draft document before writing the mapped values.
+10. When `link_payment_entry_field` is configured, app writes the best available transaction-side reference back to the source document: the created `Payment Entry` name when one exists, otherwise the Pine Labs transaction reference.
 
 ## 5. Which External or Other App Integrations Are Possible
 
-This app can be used by another app or external caller in two ways:
+This app is designed to support both standard ERPNext form usage and API-first integrations. Another app or external caller can reuse the same business logic in two ways:
 
 1. By calling whitelisted Frappe endpoints:
-   - `get_trigger_context`
-   - `initiate_payment`
-   - `check_payment_status`
-   - `cancel_payment`
-   - `get_pinelabs_payment_modes`
-   - `get_payment_settings`
-   - `is_pinelabs_available`
-   - `get_available_machines`
-   - `test_credentials`
-   - `get_webhook_url`
+   - `pinelabs_fin.api.pos_endpoints.get_trigger_context`
+   - `pinelabs_fin.api.pos_endpoints.initiate_payment`
+   - `pinelabs_fin.api.pos_endpoints.check_payment_status`
+   - `pinelabs_fin.api.pos_endpoints.cancel_payment`
+   - `pinelabs_fin.api.pos_endpoints.get_pinelabs_payment_modes`
+   - `pinelabs_fin.api.pos_endpoints.get_payable_doctypes`
+   - `pinelabs_fin.api.pos_endpoints.get_payment_settings`
+   - `pinelabs_fin.api.pos_endpoints.is_pinelabs_available`
+   - `pinelabs_fin.api.pos_endpoints.get_available_machines`
+   - `pinelabs_fin.api.pos_endpoints.test_credentials`
+   - `pinelabs_fin.api.webhooks.get_webhook_url`
 
 2. By importing shared backend functions from the service layer:
    - `evaluate_pinelabs_context`
@@ -177,6 +186,98 @@ This app can be used by another app or external caller in two ways:
    - `handle_failure`
 
 That means another custom app can pass request data into this app and continue the same Pine Labs flow without duplicating terminal logic.
+
+## 5.1 Configuring Built-in Form Buttons
+
+Go to `Pine Labs Settings` and open the `Payable Doctypes` child table. Add one enabled row for each doctype where you want the built-in Pinelabs pay button to appear.
+
+Display config fields:
+
+- `Doctype`: Link to `DocType`
+- `Button label`: custom toolbar label, default is `Pay via Pinelabs`
+- `Show on docstatus`: `0`, `1`, or `0,1`
+- `Enabled`: toggle to include or exclude the row
+
+Field mapping fields:
+
+- `Amount field`: source document field that holds the payable amount, such as `outstanding_amount`, `grand_total`, or `payable_amount`
+- `Status field`: source document field used to detect and update paid state, such as `status` or `payment_status`
+- `Paid status value`: value written to `Status field` after success when not creating a Payment Entry, such as `Paid` or `Completed`
+- `Payment Entry link field`: optional source document field that stores the created `Payment Entry` name when one exists, or the Pine Labs transaction reference for mapped-only flows
+- `Create Payment Entry`: when checked, the app runs the standard ERPNext Payment Entry finalization path; when unchecked, the app updates the mapped source-document fields only
+
+Behavior after configuration:
+
+- The frontend injector reads these rows through `pinelabs_fin.api.pos_endpoints.get_payable_doctypes` and adds the button in the form toolbar under the `Pinelabs` group.
+- If `Show on docstatus = 0`, the button appears on saved draft documents.
+- If `Show on docstatus = 1`, the button appears on submitted documents.
+- If `Show on docstatus = 0,1`, the button appears on draft or submitted documents.
+- Cancelled documents are always excluded.
+- The frontend reads the payment amount from the configured `Amount field` and blocks the click if the value is missing or not greater than zero.
+- Clicking the button opens a payment-mode picker when multiple Pine Labs modes are active, such as `Card` and `UPI`.
+- If only one Pine Labs mode is enabled, the flow starts immediately without showing the picker.
+- Clicking the button does not bypass backend validation. The app still calls `pinelabs_fin.api.pos_endpoints.get_trigger_context` before payment starts, so only eligible documents proceed.
+- After terminal approval, the app uses the row mapping to either create a `Payment Entry` or update the mapped paid-state fields.
+- In mapped-only flows, the backend treats `Status field == Paid status value` as the already-paid check for future retries.
+- In mapped-only flows, if `Paid status value` is literally `Submitted` and the source doctype is submittable, the backend submits the draft document before writing the mapped fields.
+- If `Payment Entry link field` is configured, the backend writes the created `Payment Entry` name for Payment Entry flows and otherwise falls back to the Pine Labs transaction reference for mapped-only flows.
+
+Important migration note:
+
+- Older rows that used `Show when = Outstanding > 0` or `Always` must be manually reconfigured with `Show on docstatus` and the mapping fields.
+- `Create Payment Entry` is supported only for doctypes handled by the existing ERPNext Payment Entry bridge, currently `Sales Invoice` and `POS Invoice`.
+- Custom doctypes should usually use `Create Payment Entry = 0`, then configure `Amount field`, `Status field`, and `Paid status value`.
+- The settings form validates that the configured doctype exists, is not a child table or single doctype, and that `Amount field` is numeric.
+
+Example rows:
+
+| Doctype | Show on docstatus | Amount field | Status field | Paid status value | Create Payment Entry |
+| --- | --- | --- | --- | --- | --- |
+| Sales Invoice | `1` | `outstanding_amount` | `status` | `Paid` | checked |
+| POS Invoice | `1` | `outstanding_amount` | `status` | `Paid` | checked |
+| Custom Fee Form | `0,1` | `payable_amount` | `payment_status` | `Completed` | unchecked |
+
+## 5.2 Integrating from a Custom Page or External App
+
+For custom pages or external apps, the integration stays API-first: you render your own button or picker and call the same shared Pinelabs APIs the standard form flow uses. In the current codebase, the relevant whitelisted methods for payment initiation live under `pinelabs_fin.api.pos_endpoints.*`. The webhook URL helper lives under `pinelabs_fin.api.webhooks.get_webhook_url`.
+
+### Step 1 — check availability
+
+Call `pinelabs_fin.api.pos_endpoints.is_pinelabs_available` to confirm the integration is available. It returns `{ available, enabled, active_endpoint }`.
+
+### Step 2 — fetch modes
+
+Call `pinelabs_fin.api.pos_endpoints.get_pinelabs_payment_modes` to fetch the active modes. It returns rows shaped like `{ mode_of_payment, label, allowed_payment_mode }`. Render these in your own UI as buttons, chips, or a picker.
+
+If you want to mirror the app-owned built-in button configuration, call `pinelabs_fin.api.pos_endpoints.get_payable_doctypes` to fetch the enabled doctype rows from `Pine Labs Settings`. Each row includes `show_on_docstatus`, `amount_field`, `status_field`, `paid_status_value`, `link_payment_entry_field`, and `finalize_via_payment_entry`.
+
+### Step 3 — initiate and poll
+
+Call `pinelabs_fin.api.pos_endpoints.initiate_payment` with `source_doctype`, `source_docname`, `mode_of_payment`, and `amount`. If a payable-doctype row exists, the backend reloads that row and uses the configured `amount_field` as the authoritative amount. Use the returned `transaction_reference` to poll `pinelabs_fin.api.pos_endpoints.check_payment_status` every 3 seconds. When `status = "Approved"`, the app has already finalized the configured flow, either by creating a `Payment Entry` or by writing the mapped status and trace fields, and for submittable mapped doctypes it may also submit the document when the configured paid-state is `Submitted`.
+
+```js
+async function sendToPinelabs(doctype, docname, amount) {
+  const api = "pinelabs_fin.api.pos_endpoints";
+  const available = (await frappe.call({ method: `${api}.is_pinelabs_available` })).message;
+  if (!available?.available) return frappe.msgprint(__("Pine Labs is not available."));
+  const modes = (await frappe.call({ method: `${api}.get_pinelabs_payment_modes` })).message || [];
+  const mode = modes[0];
+  const init = (await frappe.call({
+    method: `${api}.initiate_payment`,
+    args: { source_doctype: doctype, source_docname: docname, mode_of_payment: mode.mode_of_payment, amount },
+  })).message;
+  const ref = init?.transaction_reference;
+  const timer = setInterval(async () => {
+    const status = (await frappe.call({
+      method: `${api}.check_payment_status`,
+      args: { transaction_reference: ref },
+    })).message;
+    if (status?.status === "Approved") { clearInterval(timer); cur_frm.reload_doc(); }
+  }, 3000);
+}
+```
+
+If the user cancels the dialog or your page times out, call `pinelabs_fin.api.pos_endpoints.cancel_payment(transaction_reference)` so the app can forward the cancel request to Pine Labs and close the transaction cleanly. If your integration also needs the webhook method URL, call `pinelabs_fin.api.webhooks.get_webhook_url`.
 
 ## 6. Request and Response Data
 
@@ -222,7 +323,17 @@ These are taken from the current code behavior. Some fields may be optional depe
       "is_enabled": 1
     }
   ],
-  "doc_state": "draft"
+  "doc_state": "draft",
+  "payable_config": {
+    "doctype_name": "Payment Entry",
+    "button_label": "Pay via Pinelabs",
+    "show_on_docstatus": "0",
+    "amount_field": "paid_amount",
+    "status_field": "status",
+    "paid_status_value": "Paid",
+    "link_payment_entry_field": null,
+    "finalize_via_payment_entry": 0
+  }
 }
 ```
 
@@ -236,6 +347,7 @@ These are taken from the current code behavior. Some fields may be optional depe
 - `selected_mode_config`: full mode config
 - `payment_modes`: all enabled PineLabs modes
 - `doc_state`: `draft`, `submitted`, `cancelled`, or `null`
+- `payable_config`: enabled payable-doctype row used for mapped validation, or `null` when direct API fallback logic is used
 
 ## 8. Request: `get_pinelabs_payment_modes`
 
@@ -429,6 +541,8 @@ This is built by the Pine Labs client before calling `UploadBilledTransaction`.
   "payment_entry": "ACC-PAY-2026-0007"
 }
 ```
+
+For mapped-only doctypes, the same response shape is used, but `finalization_status` may be `fields_updated` and `payment_entry` may remain `null`.
 
 ### If Status Check Fails Before Approval
 
@@ -721,9 +835,9 @@ Stored business and communication fields:
 
 ## 20. Final ERPNext Response Behavior
 
-When the transaction reaches `Approved`, the app may create `Payment Entry` and return final business result.
+When the transaction reaches `Approved`, the app either creates a `Payment Entry` or updates mapped fields and returns the final business result.
 
-Typical finalization response:
+Typical `Payment Entry` finalization response:
 
 ```json
 {
@@ -737,24 +851,63 @@ Typical finalization response:
 }
 ```
 
+Typical mapped-field finalization response:
+
+```json
+{
+  "success": true,
+  "invoice_name": "ACC-PAY-2026-0001",
+  "invoice_doctype": "Payment Entry",
+  "invoice_finalized": true,
+  "finalization_status": "fields_updated",
+  "payment_entry": null,
+  "message": "Updated reference_no, status on Payment Entry ACC-PAY-2026-0001."
+}
+```
+
 Possible finalization statuses:
 
 1. `finalized`
 2. `already_finalized`
-3. `invoice_not_submitted`
-4. `failed`
-5. `skipped`
+3. `fields_updated`
+4. `invoice_not_submitted`
+5. `failed`
+6. `skipped`
 
 ## 21. Short Summary
 
 In current code, the app behaves like this:
 
-1. The app exposes a shared PineLabs frontend API but does not currently place its own button or field trigger on any doctype.
-2. Another caller can pass a saved `Sales Invoice`, `POS Invoice`, or `Payment Entry` plus a configured PineLabs `mode_of_payment`.
-3. The app validates PineLabs settings, enabled machine, selected mode, document state, and payable amount.
-4. If valid, the app starts terminal communication, stores the transaction log, and continues through polling, webhook, cancel, and finalization flow.
+1. The app can place built-in Pinelabs buttons on configured ERPNext or custom Frappe forms by reading `Pinelabs Settings > Payable Doctypes`.
+2. The app also remains API-first, so custom pages and external apps can render their own payment control and call the same shared Pinelabs endpoints.
+3. When a payable-doctype row exists, the app validates docstatus, mapped amount, selected mode, enabled machine, and paid state through `get_trigger_context`.
+4. If valid, the app starts terminal communication, stores the transaction log, tracks status through polling or webhook, and finalizes the flow using either `Payment Entry` creation or mapped field updates.
 
 This file documents the current implemented behavior only.
+
+## 22. Manual Testing Instructions
+
+After deploying this change:
+
+1. Run `bench --site <site-name> migrate`.
+2. Run `bench build --app pinelabs_fin`.
+3. Hard-refresh Desk with `Ctrl+Shift+R`.
+4. Open `Pine Labs Settings`.
+5. Reconfigure existing `Payable Doctypes` rows because old `Show when` values are no longer used.
+6. Add a `Sales Invoice` row:
+   - `Show on docstatus`: `1`
+   - `Amount field`: `outstanding_amount`
+   - `Status field`: `status`
+   - `Paid status value`: `Paid`
+   - `Create Payment Entry`: checked
+7. Open a submitted Sales Invoice with `outstanding_amount > 0` and confirm the Pinelabs toolbar button appears under the `Pinelabs` group.
+8. Open a draft Sales Invoice and confirm the button does not appear for the `Show on docstatus = 1` row.
+9. Change the row to `Show on docstatus = 0,1`, refresh Desk, and confirm the button appears on draft and submitted documents but not cancelled documents.
+10. Configure a custom doctype row with `Create Payment Entry` unchecked, a numeric `Amount field`, a `Status field`, and a `Paid status value`.
+11. If that doctype is submittable and you want the payment flow to submit the document, set `Paid status value` to `Submitted`.
+12. Trigger a test terminal payment from that custom doctype and confirm approval writes the mapped fields. If `Payment Entry link field` is configured, confirm it stores the created `Payment Entry` name when one exists, otherwise the Pine Labs transaction reference.
+13. For the Sales Invoice row, confirm approval creates a `Payment Entry` and links it to `Pinelabs Transaction Log`.
+14. Test the cancel path from the polling dialog and confirm the transaction log is marked cancelled.
 
 ## License
 

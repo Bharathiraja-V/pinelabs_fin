@@ -6,7 +6,7 @@ from __future__ import unicode_literals
 import frappe
 import json
 from frappe import _
-from frappe.utils import flt
+from frappe.utils import cint, flt
 from pinelabs_fin.api.host_adapter import get_host_adapter
 from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
 
@@ -99,6 +99,22 @@ def get_pinelabs_payment_modes():
         )
 
     return payment_modes
+
+
+@frappe.whitelist()
+def get_payable_doctypes():
+    """
+    Return enabled rows from the Pine Labs Settings payable_doctypes child table.
+    Called by the frontend form button injector on page load.
+    """
+    from pinelabs_fin.api import services
+
+    settings = frappe.get_single("Pinelabs Settings")
+    return [
+        services.serialize_payable_doctype_config(row)
+        for row in settings.get("payable_doctypes", [])
+        if cint(row.is_enabled) == 1 and row.doctype_name
+    ]
 
 
 @frappe.whitelist()

@@ -1,0 +1,102 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-04-09 20:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "doctype_name",
+  "button_label",
+  "show_on_docstatus",
+  "is_enabled",
+  "amount_field",
+  "status_field",
+  "paid_status_value",
+  "link_payment_entry_field",
+  "finalize_via_payment_entry"
+ ],
+ "fields": [
+  {
+   "fieldname": "doctype_name",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "Doctype",
+   "options": "DocType",
+   "reqd": 1
+  },
+  {
+   "default": "Pay via Pinelabs",
+   "fieldname": "button_label",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Button label"
+  },
+  {
+   "default": "1",
+   "description": "Use 0 for Draft, 1 for Submitted, or 0,1 for both. Cancelled documents are always excluded.",
+   "fieldname": "show_on_docstatus",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Show on docstatus",
+   "options": "0\n1\n0,1",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "is_enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "description": "Field on the source doctype that holds the payable amount, for example outstanding_amount or grand_total.",
+   "fieldname": "amount_field",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Amount field",
+   "reqd": 1
+  },
+  {
+   "description": "Field on the source doctype to check and update after a successful payment.",
+   "fieldname": "status_field",
+   "fieldtype": "Select",
+   "label": "Status field"
+  },
+  {
+   "description": "Value written into Status field after a successful payment, for example Paid or Completed.",
+   "fieldname": "paid_status_value",
+   "fieldtype": "Data",
+   "label": "Paid status value"
+  },
+  {
+   "description": "Optional field on the source doctype where the created Payment Entry name is stored.",
+   "fieldname": "link_payment_entry_field",
+   "fieldtype": "Select",
+   "label": "Payment Entry link field"
+  },
+  {
+   "default": "1",
+   "description": "If checked, use ERPNext Payment Entry finalization. If unchecked, only mapped fields are updated.",
+   "fieldname": "finalize_via_payment_entry",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Create Payment Entry"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-04-09 20:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Pinelabs Fin",
+ "name": "Pinelabs Payable Doctype",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

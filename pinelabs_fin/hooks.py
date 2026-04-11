@@ -26,9 +26,12 @@ app_license = "mit"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/pinelabs_fin/css/pinelabs_fin.css"
-# Shared PineLabs helper is loaded globally, but doctype trigger ownership
-# remains outside the app until the MOP entry point is finalized.
-app_include_js = "/assets/pinelabs_fin/js/pinelabs_payment.js"
+# Shared PineLabs helper is loaded first, then the dynamic button injector
+# can register doctype hooks on top of it.
+app_include_js = [
+	"/assets/pinelabs_fin/js/pinelabs_payment.js",
+	"/assets/pinelabs_fin/js/form_button_injector.js",
+]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/pinelabs_fin/css/pinelabs_fin.css"

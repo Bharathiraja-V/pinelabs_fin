@@ -17,6 +17,7 @@ from frappe.utils import cint, flt
 
 
 MANUAL_TRIGGER_STYLE = "manual"
+DEFAULT_BUTTON_LABEL = "Pay via Pinelabs"
 
 
 def get_settings():
@@ -88,31 +89,113 @@ def resolve_trigger_style(doctype=None, context=None):
 	return MANUAL_TRIGGER_STYLE
 
 
-def get_payable_amount(doc):
+def serialize_payable_doctype_config(row):
+	"""Return the public payable-doctype config payload for a settings row."""
+	if not row:
+		return None
+
+	finalize_via_payment_entry = getattr(row, "finalize_via_payment_entry", None)
+	if finalize_via_payment_entry is None:
+		finalize_via_payment_entry = 1
+
+	return {
+		"doctype_name": row.doctype_name,
+		"button_label": row.button_label or DEFAULT_BUTTON_LABEL,
+		"show_on_docstatus": row.show_on_docstatus or "1",
+		"is_enabled": cint(row.is_enabled),
+		"amount_field": row.amount_field or None,
+		"status_field": row.status_field or None,
+		"paid_status_value": row.paid_status_value or None,
+		"link_payment_entry_field": row.link_payment_entry_field or None,
+		"finalize_via_payment_entry": cint(finalize_via_payment_entry),
+	}
+
+
+def get_payable_doctype_config(doctype, enabled_only=True):
+	"""Return the configured payable-doctype row for a source doctype, if enabled."""
+	if not doctype:
+		return None
+
+	try:
+		settings = get_settings()
+	except Exception:
+		return None
+
+	for row in settings.get("payable_doctypes", []) or []:
+		if row.doctype_name != doctype:
+			continue
+		if enabled_only and cint(row.is_enabled) != 1:
+			continue
+		return serialize_payable_doctype_config(row)
+
+	return None
+
+
+def docstatus_matches_payable_config(doc, config):
+	"""Return True when the document docstatus is allowed by the payable config."""
+	if not config:
+		return True
+
+	docstatus = cint(getattr(doc, "docstatus", 0))
+	if docstatus == 2:
+		return False
+
+	allowed = [
+		cint(value.strip())
+		for value in (config.get("show_on_docstatus") or "1").split(",")
+		if value.strip()
+	]
+	return docstatus in allowed
+
+
+def get_payable_amount(doc, config=None):
 	"""Return the payable amount for supported source documents."""
 	if not doc:
 		return 0.0
 
-	if getattr(doc, "docstatus", 0) == 1:
-		outstanding = flt(getattr(doc, "outstanding_amount", 0))
-		return outstanding if outstanding > 0 else 0.0
+	doctype = getattr(doc, "doctype", None)
+	docstatus = cint(getattr(doc, "docstatus", 0))
 
-	if getattr(doc, "doctype", None) in ("Sales Invoice", "POS Invoice"):
+	if docstatus == 2:
+		return 0.0
+
+	if config and config.get("amount_field"):
+		return max(flt(getattr(doc, config.get("amount_field"), 0)), 0.0)
+
+	if doctype in ("Sales Invoice", "POS Invoice"):
+		if docstatus == 1:
+			outstanding = flt(getattr(doc, "outstanding_amount", 0))
+			return outstanding if outstanding > 0 else 0.0
+
 		return max(
 			flt(getattr(doc, "grand_total", 0)) - flt(getattr(doc, "paid_amount", 0)),
 			0.0,
 		)
 
-	if getattr(doc, "doctype", None) == "Payment Entry":
-		return flt(getattr(doc, "paid_amount", 0))
+	if doctype == "Payment Entry":
+		if docstatus != 0:
+			return 0.0
+		return max(flt(getattr(doc, "paid_amount", 0)), 0.0)
+
+	if docstatus == 1:
+		outstanding = flt(getattr(doc, "outstanding_amount", 0))
+		return outstanding if outstanding > 0 else 0.0
 
 	return 0.0
 
 
-def is_doc_already_paid(doc):
+def is_doc_already_paid(doc, config=None):
 	"""Return True when the submitted source document is fully paid."""
 	if not doc:
 		return False
+
+	if config and config.get("status_field") and config.get("paid_status_value"):
+		status_value = getattr(doc, config.get("status_field"), None)
+		if str(status_value or "").strip() == str(config.get("paid_status_value") or "").strip():
+			return True
+		if cint(config.get("finalize_via_payment_entry")) != 1:
+			return False
+
 	if getattr(doc, "docstatus", 0) != 1:
 		return False
 	return flt(getattr(doc, "outstanding_amount", 0)) <= 0
@@ -135,7 +218,12 @@ def get_selected_mode_of_payment(doc, mode_of_payment=None):
 	return None
 
 
-def validate_trigger_context(doc, mode_of_payment, trigger_style=MANUAL_TRIGGER_STYLE):
+def validate_trigger_context(
+	doc,
+	mode_of_payment,
+	trigger_style=MANUAL_TRIGGER_STYLE,
+	config=None,
+):
 	"""Validate whether the given document is ready for PineLabs payment."""
 	if not is_pinelabs_enabled():
 		return False, _("PineLabs integration is not enabled.")
@@ -155,10 +243,13 @@ def validate_trigger_context(doc, mode_of_payment, trigger_style=MANUAL_TRIGGER_
 	if getattr(doc, "docstatus", 0) == 2:
 		return False, _("Document is cancelled.")
 
-	if get_payable_amount(doc) <= 0:
+	if config and not docstatus_matches_payable_config(doc, config):
+		return False, _("Document docstatus is not allowed for PineLabs payment.")
+
+	if get_payable_amount(doc, config=config) <= 0:
 		return False, _("Document has no payable amount.")
 
-	if is_doc_already_paid(doc):
+	if is_doc_already_paid(doc, config=config):
 		return False, _("Document is already fully paid.")
 
 	return True, None
@@ -175,6 +266,7 @@ def evaluate_pinelabs_context(doctype, docname=None, mode_of_payment=None, conte
 		"selected_mode_config": None,
 		"payment_modes": get_all_enabled_pinelabs_modes(),
 		"doc_state": None,
+		"payable_config": None,
 	}
 
 	if not is_pinelabs_enabled():
@@ -196,7 +288,9 @@ def evaluate_pinelabs_context(doctype, docname=None, mode_of_payment=None, conte
 		return response
 
 	doc = frappe.get_doc(doctype, docname)
-	response["payable_amount"] = get_payable_amount(doc)
+	payable_config = get_payable_doctype_config(doctype)
+	response["payable_config"] = payable_config
+	response["payable_amount"] = get_payable_amount(doc, config=payable_config)
 
 	docstatus = getattr(doc, "docstatus", 0)
 	if docstatus == 0:
@@ -215,6 +309,7 @@ def evaluate_pinelabs_context(doctype, docname=None, mode_of_payment=None, conte
 		doc,
 		selected_mode,
 		trigger_style=response["trigger_style"],
+		config=payable_config,
 	)
 	response["can_trigger"] = eligible
 	response["reason"] = reason
@@ -247,10 +342,12 @@ def handle_mode_of_payment_trigger(
 			"error": _("Mode of Payment '{0}' is not a PineLabs mode.").format(mode_of_payment),
 		}
 
+	payable_amount = flt(context_data.get("payable_amount") or amount)
+
 	return start_terminal_payment(
 		source_doctype=doctype,
 		source_docname=docname,
-		amount=flt(amount),
+		amount=payable_amount,
 		mode_of_payment=mode_of_payment,
 		allowed_payment_mode=cint(mode_config["allowed_payment_mode"]),
 		payment_mode_label=mode_config["label"],
@@ -333,9 +430,10 @@ def cancel_payment(transaction_reference):
 
 def handle_success(transaction_log_name):
 	"""Handle a successful payment by creating the ERPNext payment entry."""
-	from pinelabs_fin.api.payment_bridge import create_payment_entry
+	from pinelabs_fin.api.host_adapter import get_host_adapter
 
-	return create_payment_entry(transaction_log_name)
+	log = frappe.get_doc("Pinelabs Transaction Log", transaction_log_name)
+	return get_host_adapter().finalize_transaction(log)
 
 
 def handle_failure(transaction_log_name, error_message=None):

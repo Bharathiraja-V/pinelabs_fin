@@ -23,6 +23,19 @@ def _get_bank_account(mode_of_payment, company):
 	return bank_account
 
 
+def _write_payment_entry_link(source_doctype, source_docname, payment_entry, config=None):
+	"""Write the created Payment Entry name to the mapped source field, if configured."""
+	link_field = (config or {}).get("link_payment_entry_field")
+	if link_field and payment_entry:
+		frappe.db.set_value(
+			source_doctype,
+			source_docname,
+			link_field,
+			payment_entry,
+			update_modified=True,
+		)
+
+
 def create_payment_entry(transaction_log_name):
 	"""
 	Create an ERPNext Payment Entry from an approved PineLabs transaction.
@@ -35,6 +48,7 @@ def create_payment_entry(transaction_log_name):
 	"""
 	try:
 		log = frappe.get_doc("Pinelabs Transaction Log", transaction_log_name)
+		from pinelabs_fin.api import services
 
 		# Validate status
 		if log.status != "Approved":
@@ -47,6 +61,11 @@ def create_payment_entry(transaction_log_name):
 
 		# Idempotency: check if PE already created for this transaction
 		if log.payment_entry and frappe.db.exists("Payment Entry", log.payment_entry):
+			source_doctype = log.source_doctype
+			source_docname = log.source_docname or log.external_order_id or log.invoice
+			config = services.get_payable_doctype_config(source_doctype)
+			if source_doctype and source_docname:
+				_write_payment_entry_link(source_doctype, source_docname, log.payment_entry, config=config)
 			return {
 				"success": True,
 				"payment_entry": log.payment_entry,
@@ -63,6 +82,11 @@ def create_payment_entry(transaction_log_name):
 		)
 		if existing_pe:
 			log.db_set("payment_entry", existing_pe)
+			source_doctype = log.source_doctype
+			source_docname = log.source_docname or log.external_order_id or log.invoice
+			config = services.get_payable_doctype_config(source_doctype)
+			if source_doctype and source_docname:
+				_write_payment_entry_link(source_doctype, source_docname, existing_pe, config=config)
 			return {
 				"success": True,
 				"payment_entry": existing_pe,
@@ -94,6 +118,7 @@ def create_payment_entry(transaction_log_name):
 			}
 
 		invoice_doc = frappe.get_doc(source_doctype, source_docname)
+		payable_config = services.get_payable_doctype_config(source_doctype)
 
 		# Validate invoice is submitted
 		if invoice_doc.docstatus != 1:
@@ -103,7 +128,7 @@ def create_payment_entry(transaction_log_name):
 			}
 
 		# Validate outstanding amount
-		outstanding = flt(invoice_doc.outstanding_amount)
+		outstanding = services.get_payable_amount(invoice_doc, config=payable_config)
 		if outstanding <= 0:
 			return {
 				"success": False,
@@ -178,6 +203,7 @@ def create_payment_entry(transaction_log_name):
 
 		# Update transaction log with PE reference
 		log.db_set("payment_entry", pe.name)
+		_write_payment_entry_link(source_doctype, source_docname, pe.name, config=payable_config)
 
 		return {
 			"success": True,

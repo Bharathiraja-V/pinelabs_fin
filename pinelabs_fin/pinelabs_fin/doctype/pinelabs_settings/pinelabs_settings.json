@@ -18,7 +18,9 @@
   "column_break_gfzq",
   "last_sync",
   "advanced_settings_section",
-  "auto_cancel_duration_minutes"
+  "auto_cancel_duration_minutes",
+  "payable_doctypes_section",
+  "payable_doctypes"
  ],
  "fields": [
   {
@@ -105,13 +107,24 @@
    "fieldname": "auto_cancel_duration_minutes",
    "fieldtype": "Int",
    "label": "Auto Cancel Duration (Minutes)"
+  },
+  {
+   "fieldname": "payable_doctypes_section",
+   "fieldtype": "Section Break",
+   "label": "Payable doctypes"
+  },
+  {
+   "fieldname": "payable_doctypes",
+   "fieldtype": "Table",
+   "label": "Payable doctypes",
+   "options": "Pinelabs Payable Doctype"
   }
  ],
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-04-07 12:00:00.000000",
+ "modified": "2026-04-09 20:00:00.000000",
  "modified_by": "Administrator",
  "module": "Pinelabs Fin",
  "name": "Pinelabs Settings",
