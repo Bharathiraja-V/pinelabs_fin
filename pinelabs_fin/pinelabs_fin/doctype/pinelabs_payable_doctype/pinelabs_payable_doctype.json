@@ -66,14 +66,14 @@
   {
    "description": "Value written into Status field after a successful payment, for example Paid or Completed.",
    "fieldname": "paid_status_value",
-   "fieldtype": "Data",
+   "fieldtype": "Select",
    "label": "Paid status value"
   },
   {
-   "description": "Optional field on the source doctype where the created Payment Entry name is stored.",
+   "description": "Optional field on the source doctype where the PineLabs transaction reference is stored.",
    "fieldname": "link_payment_entry_field",
    "fieldtype": "Select",
-   "label": "Payment Entry link field"
+   "label": "Transaction reference field"
   },
   {
    "default": "1",

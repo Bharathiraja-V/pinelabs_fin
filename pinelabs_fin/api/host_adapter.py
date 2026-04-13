@@ -56,15 +56,75 @@ class ERPNextAdapter(BaseHostAdapter):
 		if not link_field or not transaction_log:
 			return None
 
-		df = self._get_configured_field(order_doc.doctype, link_field)
-		if df and df.fieldtype == "Link" and df.options == "Payment Entry":
-			return getattr(transaction_log, "payment_entry", None) or None
+		return getattr(transaction_log, "transaction_reference", None) or None
 
-		return (
-			getattr(transaction_log, "payment_entry", None)
-			or getattr(transaction_log, "transaction_reference", None)
-			or None
-		)
+	def _submit_document_for_paid_status(self, order_doc, config):
+		if not order_doc or not config:
+			return False
+
+		if cint(getattr(order_doc, "docstatus", 0)) != 0:
+			return False
+
+		status_field = (config or {}).get("status_field")
+		paid_status_value = str((config or {}).get("paid_status_value") or "").strip().lower()
+		if status_field != "status" or paid_status_value not in ("submitted", "paid"):
+			return False
+
+		meta = frappe.get_meta(order_doc.doctype)
+		if not getattr(meta, "is_submittable", 0):
+			return False
+
+		order_doc.flags.ignore_permissions = True
+		order_doc.submit()
+		order_doc.reload()
+		return True
+
+	def _apply_db_updates(self, order_doc, updates):
+		if not order_doc or not updates:
+			return False
+
+		fresh_doc = frappe.get_doc(order_doc.doctype, order_doc.name)
+		for fieldname, value in updates.items():
+			fresh_doc.db_set(fieldname, value, update_modified=False)
+
+		order_doc.reload()
+		return True
+
+	def _recalculate_framework_status(self, order_doc, config):
+		status_field = (config or {}).get("status_field")
+		if not order_doc or status_field != "status" or not hasattr(order_doc, "set_status"):
+			return False
+
+		try:
+			order_doc.set_status(update=True, update_modified=False)
+		except TypeError:
+			try:
+				order_doc.set_status(update=True)
+			except TypeError:
+				order_doc.set_status()
+
+		order_doc.reload()
+		return True
+
+	def _apply_status_field_transition(self, order_doc, config):
+		status_field = (config or {}).get("status_field")
+		paid_status_value = (config or {}).get("paid_status_value")
+		status_df = self._get_configured_field(order_doc.doctype, status_field)
+
+		self._submit_document_for_paid_status(order_doc, config)
+		framework_handled = self._recalculate_framework_status(order_doc, config)
+
+		current_status = getattr(order_doc, status_field, None) if status_field else None
+		target_status = str(paid_status_value or "").strip()
+		matched = str(current_status or "").strip() == target_status
+
+		return {
+			"framework_handled": framework_handled,
+			"matched": matched,
+			"current_value": current_status,
+			"target_value": paid_status_value,
+			"is_read_only": bool(status_df and getattr(status_df, "read_only", 0)),
+		}
 
 	def _is_mapped_finalization_complete(self, order_doc, config, transaction_log):
 		status_field = (config or {}).get("status_field")
@@ -196,6 +256,9 @@ class ERPNextAdapter(BaseHostAdapter):
 				"error": result.get("error"),
 			}
 
+		self._submit_document_for_paid_status(order_doc, config)
+		order_doc.reload()
+
 		if not self.is_order_finalized(order_doc):
 			return {
 				"success": False,
@@ -222,6 +285,8 @@ class ERPNextAdapter(BaseHostAdapter):
 		try:
 			result = create_payment_entry(transaction_log.name)
 			if result.get("success"):
+				order_doc.reload()
+				self._recalculate_framework_status(order_doc, config)
 				return {
 					"success": True,
 					"invoice_name": order_doc.name,
@@ -261,25 +326,29 @@ class ERPNextAdapter(BaseHostAdapter):
 			}
 
 		try:
-			if self._should_submit_mapped_document(order_doc, config):
-				order_doc.flags.ignore_permissions = True
-				order_doc.submit()
-				order_doc.reload()
+			status_transition = self._apply_status_field_transition(order_doc, config)
 
-			updates = {status_field: paid_status_value}
-			link_field = (config or {}).get("link_payment_entry_field")
-			link_value = self._get_mapped_link_value(order_doc, config, transaction_log)
-			if link_field and link_value is not None:
-				updates[link_field] = link_value
+			updates = {}
+			if not status_transition["matched"]:
+				if status_transition["framework_handled"] and status_transition["is_read_only"]:
+					return {
+						"success": False,
+						"error": _(
+							"Status field '{0}' on {1} is controlled by ERPNext and cannot be forced to '{2}' until the document reaches that state through its business logic."
+						).format(status_field, order_doc.doctype, paid_status_value),
+					}
 
-			frappe.db.set_value(
-				order_doc.doctype,
-				order_doc.name,
-				updates,
-				update_modified=True,
-			)
+				updates[status_field] = paid_status_value
 
-			updated_fields = ", ".join(sorted(updates))
+				link_field = (config or {}).get("link_payment_entry_field")
+				link_value = self._get_mapped_link_value(order_doc, config, transaction_log)
+				if link_field and link_value is not None:
+					updates[link_field] = link_value
+
+				if updates:
+					self._apply_db_updates(order_doc, updates)
+
+			updated_fields = ", ".join(sorted(updates)) if updates else status_field
 			return {
 				"success": True,
 				"message": _("Updated {0} on {1} {2}.").format(

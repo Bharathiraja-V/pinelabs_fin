@@ -23,17 +23,12 @@ def _get_bank_account(mode_of_payment, company):
 	return bank_account
 
 
-def _write_payment_entry_link(source_doctype, source_docname, payment_entry, config=None):
-	"""Write the created Payment Entry name to the mapped source field, if configured."""
+def _write_payment_entry_link(source_doctype, source_docname, transaction_reference, config=None):
+	"""Write the PineLabs transaction reference to the mapped source field, if configured."""
 	link_field = (config or {}).get("link_payment_entry_field")
-	if link_field and payment_entry:
-		frappe.db.set_value(
-			source_doctype,
-			source_docname,
-			link_field,
-			payment_entry,
-			update_modified=True,
-		)
+	if link_field and transaction_reference:
+		source_doc = frappe.get_doc(source_doctype, source_docname)
+		source_doc.db_set(link_field, transaction_reference, update_modified=False)
 
 
 def create_payment_entry(transaction_log_name):
@@ -60,12 +55,17 @@ def create_payment_entry(transaction_log_name):
 			}
 
 		# Idempotency: check if PE already created for this transaction
-		if log.payment_entry and frappe.db.exists("Payment Entry", log.payment_entry):
-			source_doctype = log.source_doctype
-			source_docname = log.source_docname or log.external_order_id or log.invoice
-			config = services.get_payable_doctype_config(source_doctype)
-			if source_doctype and source_docname:
-				_write_payment_entry_link(source_doctype, source_docname, log.payment_entry, config=config)
+			if log.payment_entry and frappe.db.exists("Payment Entry", log.payment_entry):
+				source_doctype = log.source_doctype
+				source_docname = log.source_docname or log.external_order_id or log.invoice
+				config = services.get_payable_doctype_config(source_doctype)
+				if source_doctype and source_docname:
+					_write_payment_entry_link(
+						source_doctype,
+						source_docname,
+						log.transaction_reference,
+						config=config,
+					)
 			return {
 				"success": True,
 				"payment_entry": log.payment_entry,
@@ -76,17 +76,22 @@ def create_payment_entry(transaction_log_name):
 			}
 
 		# Also check by reference_no in case payment_entry field wasn't updated
-		existing_pe = frappe.db.exists(
-			"Payment Entry",
-			{"reference_no": log.transaction_reference, "docstatus": 1},
-		)
-		if existing_pe:
-			log.db_set("payment_entry", existing_pe)
-			source_doctype = log.source_doctype
-			source_docname = log.source_docname or log.external_order_id or log.invoice
-			config = services.get_payable_doctype_config(source_doctype)
-			if source_doctype and source_docname:
-				_write_payment_entry_link(source_doctype, source_docname, existing_pe, config=config)
+			existing_pe = frappe.db.exists(
+				"Payment Entry",
+				{"reference_no": log.transaction_reference, "docstatus": 1},
+			)
+			if existing_pe:
+				log.db_set("payment_entry", existing_pe)
+				source_doctype = log.source_doctype
+				source_docname = log.source_docname or log.external_order_id or log.invoice
+				config = services.get_payable_doctype_config(source_doctype)
+				if source_doctype and source_docname:
+					_write_payment_entry_link(
+						source_doctype,
+						source_docname,
+						log.transaction_reference,
+						config=config,
+					)
 			return {
 				"success": True,
 				"payment_entry": existing_pe,
@@ -203,7 +208,12 @@ def create_payment_entry(transaction_log_name):
 
 		# Update transaction log with PE reference
 		log.db_set("payment_entry", pe.name)
-		_write_payment_entry_link(source_doctype, source_docname, pe.name, config=payable_config)
+		_write_payment_entry_link(
+			source_doctype,
+			source_docname,
+			log.transaction_reference,
+			config=payable_config,
+		)
 
 		return {
 			"success": True,

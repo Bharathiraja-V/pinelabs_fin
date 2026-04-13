@@ -376,6 +376,28 @@
 		};
 	}
 
+	function reload_source_form(frm) {
+		if (!frm || !frm.reload_doc) {
+			return;
+		}
+
+		setTimeout(function () {
+			try {
+				debug_log("reload_source_form", {
+					doctype: frm.doctype,
+					docname: frm.docname || (frm.doc && frm.doc.name),
+				});
+				frm.reload_doc();
+			} catch (error) {
+				debug_log("reload_source_form_failed", {
+					doctype: frm.doctype,
+					docname: frm.docname || (frm.doc && frm.doc.name),
+					error: stringify_error(error),
+				});
+			}
+		}, 200);
+	}
+
 	function fire_payment(frm, row, mode_of_payment) {
 		var pinelabs = get_pinelabs_api();
 		var amount = get_payable_amount(frm, row);
@@ -390,29 +412,35 @@
 			has_trigger: !!pinelabs.trigger,
 		});
 
-		if (pinelabs.run_mode_of_payment_api) {
-			pinelabs.run_mode_of_payment_api({
-				frm: frm,
-				mode_of_payment: mode_of_payment,
-				amount: amount,
-				context: context,
-			});
-			return;
-		}
+			if (pinelabs.run_mode_of_payment_api) {
+				pinelabs.run_mode_of_payment_api({
+					frm: frm,
+					mode_of_payment: mode_of_payment,
+					amount: amount,
+					context: context,
+					on_success: function () {
+						reload_source_form(frm);
+					},
+				});
+				return;
+			}
 
 		if (!pinelabs.trigger) {
 			frappe.msgprint(__("Pine Labs payment helper is not available."));
 			return;
 		}
 
-		pinelabs.trigger({
-			source_doctype: frm.doctype,
-			source_docname: frm.doc.name || frm.docname,
-			amount: amount,
-			mode_of_payment: mode_of_payment,
-			context: context,
-		});
-	}
+			pinelabs.trigger({
+				source_doctype: frm.doctype,
+				source_docname: frm.doc.name || frm.docname,
+				amount: amount,
+				mode_of_payment: mode_of_payment,
+				context: context,
+				on_success: function () {
+					reload_source_form(frm);
+				},
+			});
+		}
 
 	function setup_debug_api() {
 		window.pinelabs_fin_debug = window.pinelabs_fin_debug || {
