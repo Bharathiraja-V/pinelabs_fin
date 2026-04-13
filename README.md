@@ -25,6 +25,7 @@ Current responsibility of the app:
 5. Poll Pine Labs for status or receive a webhook callback.
 6. Update the transaction log with terminal response and reconciliation data.
 7. Finalize the document either through standard ERPNext `Payment Entry` creation or through mapped field updates, depending on the configured payable-doctype row.
+8. For custom doctypes that need doctype-specific post-payment behavior, defer lifecycle transitions to the doctype controller through a custom handler instead of hardcoding that behavior in the shared adapter.
 
 ## 2. Where This App Works
 
@@ -52,6 +53,7 @@ Current shared frontend API:
 2. `trigger(opts)`
 3. `get_enabled_modes()`
 4. `get_mode_config(mode_of_payment)`
+5. `get_upi_mode_config()`
 
 Current backend integration points:
 
@@ -61,6 +63,7 @@ Current backend integration points:
 4. Payment cancellation
 5. Webhook processing
 6. ERPNext finalization through Payment Entry creation or mapped field updates
+7. Doctype-owned payment-success hook for custom doctypes
 
 ## 3. Frontend Behavior
 
@@ -84,6 +87,7 @@ Important note:
 - External callers can still render their own button and invoke the same shared APIs directly.
 - Current code validates first through `get_trigger_context`, then starts terminal communication.
 - Status, cancel, webhook, and finalization flows continue through the same backend APIs.
+- In the built-in Desk flow, the source form is reloaded after a successful payment so the latest server-side status and mapped fields are visible immediately.
 
 ## 4. End-to-End Flow
 
@@ -157,8 +161,9 @@ Important note:
 6. App resolves bank account from `Mode of Payment Account`.
 7. If `Create Payment Entry` is checked, app attempts ERPNext `Payment Entry` creation for source flows that finalize through the standard accounting path.
 8. If `Create Payment Entry` is unchecked, app treats `status_field == paid_status_value` as the mapped paid-state check and writes the configured mapped fields on the source document after approval.
-9. In mapped finalization, if `paid_status_value` is `Submitted` and the source doctype is submittable, app submits the draft document before writing the mapped values.
-10. When `link_payment_entry_field` is configured, app writes the best available transaction-side reference back to the source document: the created `Payment Entry` name when one exists, otherwise the Pine Labs transaction reference.
+9. In mapped finalization, when `status_field` is the framework-managed `status` field and `paid_status_value` is `Submitted`, app first tries the real document transition and then recalculates the doctype status through ERPNext/Frappe logic.
+10. When `link_payment_entry_field` is configured, app writes the Pine Labs transaction reference back to the source document for traceability.
+11. For custom doctypes that expose an `apply_pinelabs_payment_success(transaction_log=None, config=None)` controller method, the adapter calls that doctype-owned handler first and then falls back to shared mapped-field updates for any remaining values.
 
 ## 5. Which External or Other App Integrations Are Possible
 
@@ -203,8 +208,15 @@ Field mapping fields:
 - `Amount field`: source document field that holds the payable amount, such as `outstanding_amount`, `grand_total`, or `payable_amount`
 - `Status field`: source document field used to detect and update paid state, such as `status` or `payment_status`
 - `Paid status value`: value written to `Status field` after success when not creating a Payment Entry, such as `Paid` or `Completed`
-- `Payment Entry link field`: optional source document field that stores the created `Payment Entry` name when one exists, or the Pine Labs transaction reference for mapped-only flows
+- `Transaction reference field`: optional source document field that stores the Pine Labs transaction reference after payment success
 - `Create Payment Entry`: when checked, the app runs the standard ERPNext Payment Entry finalization path; when unchecked, the app updates the mapped source-document fields only
+
+Settings UI behavior:
+
+- Select `Doctype` first. The settings form then loads valid options for `Show on docstatus`, `Amount field`, `Status field`, and `Transaction reference field` from that doctype.
+- `Show on docstatus` is doctype-aware: submittable doctypes can use `0`, `1`, or `0,1`; non-submittable doctypes use `0` only.
+- When you select `Status field`, the form loads `Paid status value` from that field's dropdown options, if the field has defined options.
+- The `Transaction reference field` picker is limited to text-style fields intended to hold a Pine Labs transaction reference string.
 
 Behavior after configuration:
 
@@ -219,8 +231,10 @@ Behavior after configuration:
 - Clicking the button does not bypass backend validation. The app still calls `pinelabs_fin.api.pos_endpoints.get_trigger_context` before payment starts, so only eligible documents proceed.
 - After terminal approval, the app uses the row mapping to either create a `Payment Entry` or update the mapped paid-state fields.
 - In mapped-only flows, the backend treats `Status field == Paid status value` as the already-paid check for future retries.
-- In mapped-only flows, if `Paid status value` is literally `Submitted` and the source doctype is submittable, the backend submits the draft document before writing the mapped fields.
-- If `Payment Entry link field` is configured, the backend writes the created `Payment Entry` name for Payment Entry flows and otherwise falls back to the Pine Labs transaction reference for mapped-only flows.
+- In mapped-only flows, if `Status field` is `status` and `Paid status value` is `Submitted`, the backend attempts the framework transition first instead of forcing a fake status value onto a managed doctype.
+- If `Transaction reference field` is configured, the backend writes the Pine Labs transaction reference for both Payment Entry and mapped-only flows.
+- After approval in the built-in Desk flow, the current form reloads automatically so the user sees the refreshed document state.
+- When a custom doctype needs submit/save behavior that belongs to that doctype, implement `apply_pinelabs_payment_success(transaction_log=None, config=None)` in the doctype controller. The shared adapter will call it before applying generic mapped-field fallback logic.
 
 Important migration note:
 
@@ -249,11 +263,11 @@ Call `pinelabs_fin.api.pos_endpoints.is_pinelabs_available` to confirm the integ
 
 Call `pinelabs_fin.api.pos_endpoints.get_pinelabs_payment_modes` to fetch the active modes. It returns rows shaped like `{ mode_of_payment, label, allowed_payment_mode }`. Render these in your own UI as buttons, chips, or a picker.
 
-If you want to mirror the app-owned built-in button configuration, call `pinelabs_fin.api.pos_endpoints.get_payable_doctypes` to fetch the enabled doctype rows from `Pine Labs Settings`. Each row includes `show_on_docstatus`, `amount_field`, `status_field`, `paid_status_value`, `link_payment_entry_field`, and `finalize_via_payment_entry`.
+If you want to mirror the app-owned built-in button configuration, call `pinelabs_fin.api.pos_endpoints.get_payable_doctypes` to fetch the enabled doctype rows from `Pine Labs Settings`. Each row includes `show_on_docstatus`, `amount_field`, `status_field`, `paid_status_value`, `link_payment_entry_field`, and `finalize_via_payment_entry`. The `link_payment_entry_field` value represents the source field where the Pine Labs transaction reference should be written.
 
 ### Step 3 — initiate and poll
 
-Call `pinelabs_fin.api.pos_endpoints.initiate_payment` with `source_doctype`, `source_docname`, `mode_of_payment`, and `amount`. If a payable-doctype row exists, the backend reloads that row and uses the configured `amount_field` as the authoritative amount. Use the returned `transaction_reference` to poll `pinelabs_fin.api.pos_endpoints.check_payment_status` every 3 seconds. When `status = "Approved"`, the app has already finalized the configured flow, either by creating a `Payment Entry` or by writing the mapped status and trace fields, and for submittable mapped doctypes it may also submit the document when the configured paid-state is `Submitted`.
+Call `pinelabs_fin.api.pos_endpoints.initiate_payment` with `source_doctype`, `source_docname`, `mode_of_payment`, and `amount`. If a payable-doctype row exists, the backend reloads that row and uses the configured `amount_field` as the authoritative amount. Use the returned `transaction_reference` to poll `pinelabs_fin.api.pos_endpoints.check_payment_status` every 3 seconds. When `status = "Approved"`, the app has already finalized the configured flow, either by creating a `Payment Entry` or by writing the mapped status and trace fields. For framework-managed `status` fields, the backend lets the doctype's own business logic drive the final status whenever possible.
 
 ```js
 async function sendToPinelabs(doctype, docname, amount) {
@@ -278,6 +292,36 @@ async function sendToPinelabs(doctype, docname, amount) {
 ```
 
 If the user cancels the dialog or your page times out, call `pinelabs_fin.api.pos_endpoints.cancel_payment(transaction_reference)` so the app can forward the cancel request to Pine Labs and close the transaction cleanly. If your integration also needs the webhook method URL, call `pinelabs_fin.api.webhooks.get_webhook_url`.
+
+## 5.3 Custom Doctype Controller Hook
+
+For custom doctypes, keep document lifecycle behavior in the doctype controller whenever payment success should do more than write a field value.
+
+Current shared adapter behavior:
+
+1. For mapped-only flows, the shared adapter updates the configured fields using standard Frappe document APIs.
+2. If the doctype exposes a controller method named `apply_pinelabs_payment_success(transaction_log=None, config=None)`, the adapter calls that method first.
+3. The doctype controller can then decide whether to:
+   - call `self.submit()`
+   - call `self.save()`
+   - update read-only or trace fields through `self.db_set(..., notify=True)`
+   - leave the document in draft and only change its custom payment fields
+
+Why this is the preferred pattern:
+
+- `docstatus` belongs to Frappe and the doctype controller, not to the shared Pinelabs mapping row
+- doctype-specific business rules stay with that doctype
+- the shared payment adapter remains reusable across ERPNext doctypes and custom doctypes
+
+Current example in this app:
+
+- [pinelabs_test_order.py](/home/finstein-emp/bench-bulb/apps/pinelabs_fin/pinelabs_fin/pinelabs_fin/doctype/pinelabs_test_order/pinelabs_test_order.py)
+
+That example shows how a custom doctype can:
+
+- set its own mapped payment status
+- write the Pine Labs transaction reference
+- decide whether a successful payment should submit the document
 
 ## 6. Request and Response Data
 
@@ -905,9 +949,10 @@ After deploying this change:
 9. Change the row to `Show on docstatus = 0,1`, refresh Desk, and confirm the button appears on draft and submitted documents but not cancelled documents.
 10. Configure a custom doctype row with `Create Payment Entry` unchecked, a numeric `Amount field`, a `Status field`, and a `Paid status value`.
 11. If that doctype is submittable and you want the payment flow to submit the document, set `Paid status value` to `Submitted`.
-12. Trigger a test terminal payment from that custom doctype and confirm approval writes the mapped fields. If `Payment Entry link field` is configured, confirm it stores the created `Payment Entry` name when one exists, otherwise the Pine Labs transaction reference.
+12. Trigger a test terminal payment from that custom doctype and confirm approval writes the mapped fields. If `Transaction reference field` is configured, confirm it stores the Pine Labs transaction reference.
 13. For the Sales Invoice row, confirm approval creates a `Payment Entry` and links it to `Pinelabs Transaction Log`.
-14. Test the cancel path from the polling dialog and confirm the transaction log is marked cancelled.
+14. Confirm the open document reloads after a successful built-in Desk payment so refreshed status and mapped fields are visible without a manual refresh.
+15. Test the cancel path from the polling dialog and confirm the transaction log is marked cancelled.
 
 ## License
 

@@ -30,6 +30,13 @@ class BaseHostAdapter:
 class ERPNextAdapter(BaseHostAdapter):
 	"""ERPNext/Frappe adapter implementation."""
 
+	def _get_payment_success_handler(self, order_doc):
+		if not order_doc:
+			return None
+
+		handler = getattr(order_doc, "apply_pinelabs_payment_success", None)
+		return handler if callable(handler) else None
+
 	def _get_configured_field(self, doctype, fieldname):
 		if not doctype or not fieldname:
 			return None
@@ -39,6 +46,9 @@ class ERPNextAdapter(BaseHostAdapter):
 
 	def _should_submit_mapped_document(self, order_doc, config):
 		if not order_doc or not config:
+			return False
+
+		if self._get_payment_success_handler(order_doc):
 			return False
 
 		if cint(getattr(order_doc, "docstatus", 0)) != 0:
@@ -62,12 +72,14 @@ class ERPNextAdapter(BaseHostAdapter):
 		if not order_doc or not config:
 			return False
 
+		if self._get_payment_success_handler(order_doc):
+			return False
+
 		if cint(getattr(order_doc, "docstatus", 0)) != 0:
 			return False
 
-		status_field = (config or {}).get("status_field")
 		paid_status_value = str((config or {}).get("paid_status_value") or "").strip().lower()
-		if status_field != "status" or paid_status_value not in ("submitted", "paid"):
+		if paid_status_value != "submitted":
 			return False
 
 		meta = frappe.get_meta(order_doc.doctype)
@@ -84,8 +96,7 @@ class ERPNextAdapter(BaseHostAdapter):
 			return False
 
 		fresh_doc = frappe.get_doc(order_doc.doctype, order_doc.name)
-		for fieldname, value in updates.items():
-			fresh_doc.db_set(fieldname, value, update_modified=False)
+		fresh_doc.db_set(updates, update_modified=True, notify=True)
 
 		order_doc.reload()
 		return True
@@ -124,6 +135,18 @@ class ERPNextAdapter(BaseHostAdapter):
 			"current_value": current_status,
 			"target_value": paid_status_value,
 			"is_read_only": bool(status_df and getattr(status_df, "read_only", 0)),
+		}
+
+	def _apply_doctype_payment_success(self, order_doc, config, transaction_log=None):
+		handler = self._get_payment_success_handler(order_doc)
+		if not handler:
+			return {"handled": False}
+
+		result = handler(transaction_log=transaction_log, config=config)
+		order_doc.reload()
+		return {
+			"handled": True,
+			"result": result or {},
 		}
 
 	def _is_mapped_finalization_complete(self, order_doc, config, transaction_log):
@@ -326,6 +349,7 @@ class ERPNextAdapter(BaseHostAdapter):
 			}
 
 		try:
+			doctype_result = self._apply_doctype_payment_success(order_doc, config, transaction_log)
 			status_transition = self._apply_status_field_transition(order_doc, config)
 
 			updates = {}
@@ -340,18 +364,21 @@ class ERPNextAdapter(BaseHostAdapter):
 
 				updates[status_field] = paid_status_value
 
-				link_field = (config or {}).get("link_payment_entry_field")
-				link_value = self._get_mapped_link_value(order_doc, config, transaction_log)
-				if link_field and link_value is not None:
+			link_field = (config or {}).get("link_payment_entry_field")
+			link_value = self._get_mapped_link_value(order_doc, config, transaction_log)
+			if link_field and link_value is not None:
+				current_link_value = getattr(order_doc, link_field, None)
+				if str(current_link_value or "").strip() != str(link_value or "").strip():
 					updates[link_field] = link_value
 
-				if updates:
-					self._apply_db_updates(order_doc, updates)
+			if updates:
+				self._apply_db_updates(order_doc, updates)
 
 			updated_fields = ", ".join(sorted(updates)) if updates else status_field
 			return {
 				"success": True,
-				"message": _("Updated {0} on {1} {2}.").format(
+				"message": doctype_result.get("result", {}).get("message")
+				or _("Updated {0} on {1} {2}.").format(
 					updated_fields,
 					order_doc.doctype,
 					order_doc.name,

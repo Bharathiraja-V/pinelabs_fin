@@ -381,13 +381,22 @@
 			return;
 		}
 
-		setTimeout(function () {
+		frappe.after_ajax(function () {
 			try {
 				debug_log("reload_source_form", {
 					doctype: frm.doctype,
 					docname: frm.docname || (frm.doc && frm.doc.name),
 				});
-				frm.reload_doc();
+
+				var reload_promise = frm.reload_doc();
+				if (reload_promise && typeof reload_promise.then === "function") {
+					reload_promise.then(function () {
+						frm.refresh();
+					});
+					return;
+				}
+
+				frm.refresh();
 			} catch (error) {
 				debug_log("reload_source_form_failed", {
 					doctype: frm.doctype,
@@ -395,7 +404,7 @@
 					error: stringify_error(error),
 				});
 			}
-		}, 200);
+		});
 	}
 
 	function fire_payment(frm, row, mode_of_payment) {

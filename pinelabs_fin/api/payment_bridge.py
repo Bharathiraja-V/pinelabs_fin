@@ -28,7 +28,7 @@ def _write_payment_entry_link(source_doctype, source_docname, transaction_refere
 	link_field = (config or {}).get("link_payment_entry_field")
 	if link_field and transaction_reference:
 		source_doc = frappe.get_doc(source_doctype, source_docname)
-		source_doc.db_set(link_field, transaction_reference, update_modified=False)
+		source_doc.db_set(link_field, transaction_reference, notify=True)
 
 
 def create_payment_entry(transaction_log_name):
@@ -55,17 +55,17 @@ def create_payment_entry(transaction_log_name):
 			}
 
 		# Idempotency: check if PE already created for this transaction
-			if log.payment_entry and frappe.db.exists("Payment Entry", log.payment_entry):
-				source_doctype = log.source_doctype
-				source_docname = log.source_docname or log.external_order_id or log.invoice
-				config = services.get_payable_doctype_config(source_doctype)
-				if source_doctype and source_docname:
-					_write_payment_entry_link(
-						source_doctype,
-						source_docname,
-						log.transaction_reference,
-						config=config,
-					)
+		if log.payment_entry and frappe.db.exists("Payment Entry", log.payment_entry):
+			source_doctype = log.source_doctype
+			source_docname = log.source_docname or log.external_order_id or log.invoice
+			config = services.get_payable_doctype_config(source_doctype)
+			if source_doctype and source_docname:
+				_write_payment_entry_link(
+					source_doctype,
+					source_docname,
+					log.transaction_reference,
+					config=config,
+				)
 			return {
 				"success": True,
 				"payment_entry": log.payment_entry,
@@ -76,22 +76,22 @@ def create_payment_entry(transaction_log_name):
 			}
 
 		# Also check by reference_no in case payment_entry field wasn't updated
-			existing_pe = frappe.db.exists(
-				"Payment Entry",
-				{"reference_no": log.transaction_reference, "docstatus": 1},
-			)
-			if existing_pe:
-				log.db_set("payment_entry", existing_pe)
-				source_doctype = log.source_doctype
-				source_docname = log.source_docname or log.external_order_id or log.invoice
-				config = services.get_payable_doctype_config(source_doctype)
-				if source_doctype and source_docname:
-					_write_payment_entry_link(
-						source_doctype,
-						source_docname,
-						log.transaction_reference,
-						config=config,
-					)
+		existing_pe = frappe.db.exists(
+			"Payment Entry",
+			{"reference_no": log.transaction_reference, "docstatus": 1},
+		)
+		if existing_pe:
+			log.db_set("payment_entry", existing_pe)
+			source_doctype = log.source_doctype
+			source_docname = log.source_docname or log.external_order_id or log.invoice
+			config = services.get_payable_doctype_config(source_doctype)
+			if source_doctype and source_docname:
+				_write_payment_entry_link(
+					source_doctype,
+					source_docname,
+					log.transaction_reference,
+					config=config,
+				)
 			return {
 				"success": True,
 				"payment_entry": existing_pe,
