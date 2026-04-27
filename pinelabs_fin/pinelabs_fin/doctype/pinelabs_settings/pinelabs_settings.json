@@ -19,6 +19,7 @@
   "last_sync",
   "advanced_settings_section",
   "auto_cancel_duration_minutes",
+  "verify_ssl",
   "payable_doctypes_section",
   "payable_doctypes"
  ],
@@ -107,6 +108,13 @@
    "fieldname": "auto_cancel_duration_minutes",
    "fieldtype": "Int",
    "label": "Auto Cancel Duration (Minutes)"
+  },
+  {
+   "default": "0",
+   "description": "Verify SSL certificate for Pine Labs API requests. Disable if using UAT/Test servers with self-signed certificates.",
+   "fieldname": "verify_ssl",
+   "fieldtype": "Check",
+   "label": "Verify SSL"
   },
   {
    "fieldname": "payable_doctypes_section",

@@ -293,7 +293,16 @@ async function sendToPinelabs(doctype, docname, amount) {
 
 If the user cancels the dialog or your page times out, call `pinelabs_fin.api.pos_endpoints.cancel_payment(transaction_reference)` so the app can forward the cancel request to Pine Labs and close the transaction cleanly. If your integration also needs the webhook method URL, call `pinelabs_fin.api.webhooks.get_webhook_url`.
 
-## 5.3 Custom Doctype Controller Hook
+## 5.3 Advanced Settings
+
+Go to `Pine Labs Settings > Advanced Settings` for global integration behavior.
+
+- `Auto Cancel Duration (Minutes)`: Duration after which a pending transaction is automatically cancelled by the terminal. Default is 3 minutes.
+- `Verify SSL`: Toggle SSL certificate verification for API requests.
+  - **Enabled (checked)**: Secure communication, recommended for production.
+  - **Disabled (unchecked)**: Recommended for UAT/Test environments using self-signed certificates.
+
+## 5.4 Custom Doctype Controller Hook
 
 For custom doctypes, keep document lifecycle behavior in the doctype controller whenever payment success should do more than write a field value.
 
@@ -330,6 +339,18 @@ Below are the current request and response shapes used by the app.
 These are taken from the current code behavior. Some fields may be optional depending on the calling doctype.
 
 ## 7. Request: `get_trigger_context`
+
+
+
+
+
+
+
+
+
+
+
+
 
 ### Request
 
@@ -953,6 +974,22 @@ After deploying this change:
 13. For the Sales Invoice row, confirm approval creates a `Payment Entry` and links it to `Pinelabs Transaction Log`.
 14. Confirm the open document reloads after a successful built-in Desk payment so refreshed status and mapped fields are visible without a manual refresh.
 15. Test the cancel path from the polling dialog and confirm the transaction log is marked cancelled.
+
+## 23. Automated Testing
+
+The app includes a suite of unit tests for the backend logic.
+
+### Running Tests
+
+To run the full test suite, use the Frappe test runner:
+
+```bash
+bench --site <site-name> run-tests --app pinelabs_fin
+```
+
+Key test files:
+- `pinelabs_fin/pinelabs_fin/doctype/pinelabs_settings/test_pinelabs_settings.py`: Tests for configuration and singleton behavior.
+- `pinelabs_fin/pinelabs_fin/doctype/pinelabs_transaction_log/test_pinelabs_transaction_log.py`: Tests for transaction tracking logic.
 
 ## License
 
