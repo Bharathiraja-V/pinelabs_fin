@@ -226,13 +226,16 @@ class ERPNextAdapter(BaseHostAdapter):
 
 		order_doc = self.get_order_doc(order_id, doctype=doctype)
 		if not order_doc:
+			# If document not found, it might be a new/offline document.
+			# We return success=True but finalized=False so the frontend knows
+			# the payment is approved but the document needs saving/syncing.
 			return {
-				"success": False,
+				"success": True,
 				"invoice_name": order_id,
 				"invoice_doctype": doctype,
 				"invoice_finalized": False,
-				"finalization_status": "failed",
-				"error": _("Source document {0} was not found.").format(order_id),
+				"finalization_status": "skipped",
+				"message": _("Payment approved. Source document {0} not found (likely offline/new).").format(order_id),
 			}
 
 		config = services.get_payable_doctype_config(order_doc.doctype)

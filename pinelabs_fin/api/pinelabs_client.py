@@ -526,7 +526,8 @@ class PineLabsClient:
         """
         # Backward compat: derive allowed_payment_mode from label if not provided
         if allowed_payment_mode is None:
-            allowed_payment_mode = 11 if payment_mode == "UPI" else 1
+            search_mode = (payment_mode or "").strip().upper()
+            allowed_payment_mode = 11 if search_mode == "UPI" else 1
         else:
             allowed_payment_mode = cint(allowed_payment_mode)
 

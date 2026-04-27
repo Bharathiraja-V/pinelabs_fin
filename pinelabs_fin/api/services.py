@@ -255,13 +255,13 @@ def validate_trigger_context(
 	return True, None
 
 
-def evaluate_pinelabs_context(doctype, docname=None, mode_of_payment=None, context=None):
+def evaluate_pinelabs_context(doctype, docname=None, mode_of_payment=None, context=None, amount=None):
 	"""Return the current PineLabs context for a source document."""
 	response = {
 		"trigger_style": resolve_trigger_style(doctype=doctype, context=context),
 		"can_trigger": False,
 		"reason": None,
-		"payable_amount": 0.0,
+		"payable_amount": flt(amount or 0.0),
 		"selected_mode": None,
 		"selected_mode_config": None,
 		"payment_modes": get_all_enabled_pinelabs_modes(),
@@ -277,14 +277,41 @@ def evaluate_pinelabs_context(doctype, docname=None, mode_of_payment=None, conte
 		response["reason"] = _("Doctype is required.")
 		return response
 
-	if not docname:
+	# docname can be None or "" for new/unnamed documents in some flows
+	if docname is None:
 		response["can_trigger"] = bool(response["payment_modes"]) and has_enabled_machine()
 		if not response["can_trigger"]:
 			response["reason"] = _("No payment modes or machines configured.")
 		return response
 
-	if not frappe.db.exists(doctype, docname):
-		response["reason"] = _("{0} {1} not found.").format(doctype, docname)
+	if not docname or not frappe.db.exists(doctype, docname):
+		# If document doesn't exist in DB, it might be a new/offline POS invoice.
+		# We create a mock document for validation purposes.
+		doc = frappe._dict({
+			"doctype": doctype,
+			"name": docname,
+			"docstatus": 0,
+			"is_new": True
+		})
+		
+		payable_config = get_payable_doctype_config(doctype)
+		response["payable_config"] = payable_config
+		
+		if context and isinstance(context, dict) and context.get("amount"):
+			response["payable_amount"] = flt(context.get("amount"))
+		
+		response["doc_state"] = "draft"
+		response["can_trigger"] = True # Allow triggering for new docs if machine is configured
+		
+		selected_mode = get_selected_mode_of_payment(doc, mode_of_payment=mode_of_payment)
+		if selected_mode:
+			response["selected_mode"] = selected_mode
+			response["selected_mode_config"] = get_pinelabs_mode_config(selected_mode)
+		
+		if not has_enabled_machine():
+			response["can_trigger"] = False
+			response["reason"] = _("No PineLabs machine is configured or enabled.")
+		
 		return response
 
 	doc = frappe.get_doc(doctype, docname)
@@ -322,6 +349,7 @@ def handle_mode_of_payment_trigger(
 	docname,
 	mode_of_payment,
 	amount,
+	allowed_payment_mode=None,
 	machine_name=None,
 	context=None,
 ):
@@ -331,26 +359,39 @@ def handle_mode_of_payment_trigger(
 		docname=docname,
 		mode_of_payment=mode_of_payment,
 		context=context,
+		amount=amount,
 	)
 	if not context_data["can_trigger"]:
 		return {"success": False, "error": context_data["reason"]}
 
 	mode_config = get_pinelabs_mode_config(mode_of_payment)
-	if not mode_config:
+	if not mode_config and not allowed_payment_mode:
 		return {
 			"success": False,
 			"error": _("Mode of Payment '{0}' is not a PineLabs mode.").format(mode_of_payment),
 		}
 
 	payable_amount = flt(context_data.get("payable_amount") or amount)
+	
+	if allowed_payment_mode:
+		allowed_payment_mode = cint(allowed_payment_mode)
+	elif mode_config:
+		allowed_payment_mode = cint(mode_config.get("allowed_payment_mode"))
+	
+	if not allowed_payment_mode:
+		allowed_payment_mode = 1 # Default to Card if not specified
+	
+	payment_mode_label = (mode_config.get("label") if mode_config else None) or "Card"
+	if allowed_payment_mode == 11 and payment_mode_label == "Card":
+		payment_mode_label = "UPI"
 
 	return start_terminal_payment(
 		source_doctype=doctype,
 		source_docname=docname,
 		amount=payable_amount,
 		mode_of_payment=mode_of_payment,
-		allowed_payment_mode=cint(mode_config["allowed_payment_mode"]),
-		payment_mode_label=mode_config["label"],
+		allowed_payment_mode=allowed_payment_mode,
+		payment_mode_label=payment_mode_label,
 		machine_name=machine_name,
 	)
 

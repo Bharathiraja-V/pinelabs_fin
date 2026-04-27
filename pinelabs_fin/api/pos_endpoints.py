@@ -147,45 +147,66 @@ def initiate_payment(
 
     try:
         if not invoice_name:
-            return {"success": False, "error": _("Source document name is required")}
+            error_msg = _("Source document name is required (invoice_name)")
+            frappe.msgprint(error_msg)
+            return {"success": False, "error": error_msg}
 
         # Resolve source doctype if not provided
         resolved_doctype = source_doctype
-        if not resolved_doctype or not frappe.db.exists(resolved_doctype, invoice_name):
+        doc_exists = resolved_doctype and frappe.db.exists(resolved_doctype, invoice_name)
+        
+        if not resolved_doctype or not doc_exists:
+            # Try to resolve from DB
             if frappe.db.exists("Payment Entry", invoice_name):
                 resolved_doctype = "Payment Entry"
+                doc_exists = True
             elif frappe.db.exists("POS Invoice", invoice_name):
                 resolved_doctype = "POS Invoice"
+                doc_exists = True
             elif frappe.db.exists("Sales Invoice", invoice_name):
                 resolved_doctype = "Sales Invoice"
+                doc_exists = True
+            
+            # Fallback to provided source_doctype or POS Invoice
+            if not resolved_doctype:
+                resolved_doctype = source_doctype or "POS Invoice"
 
-        if not resolved_doctype:
-            return {
-                "success": False,
-                "error": _("Source document {0} not found").format(invoice_name),
-            }
+        # Check if we have everything needed to proceed
+        if not amount and not doc_exists:
+             error_msg = _("Cannot initiate payment: document {0} not found and no amount provided.").format(invoice_name)
+             frappe.msgprint(error_msg)
+             return {"success": False, "error": error_msg}
 
         # If mode_of_payment not provided, try to derive from payment_mode label
-        # (legacy compatibility)
         if not mode_of_payment:
+            search_mode = (payment_mode or "").strip().lower()
             for pm in services.get_all_enabled_pinelabs_modes():
-                if pm["label"] == payment_mode:
+                if (pm.get("label") or "").strip().lower() == search_mode:
                     mode_of_payment = pm["mode_of_payment"]
                     break
 
-        return services.handle_mode_of_payment_trigger(
+        result = services.handle_mode_of_payment_trigger(
             doctype=resolved_doctype,
             docname=invoice_name,
             mode_of_payment=mode_of_payment,
             amount=flt(amount),
+            allowed_payment_mode=allowed_payment_mode,
             machine_name=machine_name,
             context=context,
         )
+        
+        if not result.get("success"):
+            frappe.msgprint(_("Pine Labs Error: {0}").format(result.get("error")))
+            
+        return result
 
     except Exception as e:
-        frappe.logger().error(f"Error in initiate_payment: {str(e)}")
-        frappe.log_error(frappe.get_traceback(), "Pine Labs Payment Initiation Error")
-        return {"success": False, "error": str(e)}
+        error_trace = frappe.get_traceback()
+        frappe.logger().error(f"Error in initiate_payment: {str(e)}\n{error_trace}")
+        frappe.log_error(error_trace, "Pine Labs Payment Initiation Error")
+        error_msg = str(e)
+        frappe.msgprint(_("Pine Labs System Error: {0}").format(error_msg))
+        return {"success": False, "error": error_msg}
 
 
 def _get_transaction_log(transaction_reference):
