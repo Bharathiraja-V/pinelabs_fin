@@ -9,12 +9,16 @@
   "transaction_reference",
   "status",
   "payment_mode",
+  "mode_of_payment",
+  "allowed_payment_mode",
+  "payment_mode_label",
   "column_break_ephj",
   "invoice",
   "external_order_id",
   "source_system",
   "source_doctype",
   "source_docname",
+  "payment_entry",
   "amount",
   "created_at",
   "section_break_qkxx",
@@ -95,6 +99,14 @@
    "fieldtype": "Column Break"
   },
   {
+   "description": "Payment Entry created for this transaction",
+   "fieldname": "payment_entry",
+   "fieldtype": "Link",
+   "label": "Payment Entry",
+   "options": "Payment Entry",
+   "read_only": 1
+  },
+  {
    "fieldname": "amount",
    "fieldtype": "Currency",
    "in_list_view": 1,
@@ -103,10 +115,31 @@
   },
   {
    "fieldname": "payment_mode",
-   "fieldtype": "Select",
+   "fieldtype": "Data",
    "label": "Payment Mode",
-   "options": "Card\nUPI",
-   "reqd": 1
+   "description": "Payment mode label (e.g., Card, UPI)"
+  },
+  {
+   "fieldname": "mode_of_payment",
+   "fieldtype": "Link",
+   "label": "Mode of Payment",
+   "options": "Mode of Payment",
+   "read_only": 1,
+   "description": "ERPNext Mode of Payment used for this transaction"
+  },
+  {
+   "fieldname": "allowed_payment_mode",
+   "fieldtype": "Int",
+   "label": "Allowed Payment Mode",
+   "read_only": 1,
+   "description": "Pine Labs API AllowedPaymentMode code sent"
+  },
+  {
+   "fieldname": "payment_mode_label",
+   "fieldtype": "Data",
+   "label": "Payment Mode Label",
+   "read_only": 1,
+   "description": "Display label for the payment mode"
   },
   {
    "fieldname": "created_at",
@@ -257,7 +290,7 @@
  "grid_page_length": 50,
  "index_web_pages_for_search": 1,
  "links": [],
- "modified": "2026-03-30 20:08:38.710193",
+ "modified": "2026-04-07 12:00:00.000000",
  "modified_by": "Administrator",
  "module": "Pinelabs Fin",
  "name": "Pinelabs Transaction Log",

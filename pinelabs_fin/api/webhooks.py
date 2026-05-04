@@ -30,7 +30,7 @@ def _validate_webhook_request():
 def _extract_webhook_data(data):
     """Extract transaction details from webhook data"""
     transaction_reference = data.get("TransactionNumber") or data.get("transaction_number")
-    response_code = data.get("ResponseCode") or data.get("response_code")
+    response_code = data.get("ResponseCode") if "ResponseCode" in data else data.get("response_code")
     response_message = data.get("ResponseMessage") or data.get("response_message")
 
     if not transaction_reference:
