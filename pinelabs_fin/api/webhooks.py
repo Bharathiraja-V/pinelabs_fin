@@ -217,14 +217,20 @@ def get_webhook_url():
         webhook_url = f"{site_url}{webhook_path}"
 
         # Update settings with webhook URL
+        # Note: `Pinelabs Settings` uses `webhooks_url` (plural) in pinelabs_fin.
+        # Keep backward-compatible support for `webhook_url` if it exists.
         settings = frappe.get_single("Pinelabs Settings")
-        settings.webhook_url = webhook_url
+        if hasattr(settings, "webhooks_url"):
+            settings.webhooks_url = webhook_url
+        if hasattr(settings, "webhook_url"):
+            settings.webhook_url = webhook_url
         settings.save(ignore_permissions=True)
         frappe.db.commit()
 
         return {
             "success": True,
-            "webhook_url": webhook_url
+            "webhook_url": webhook_url,
+            "webhooks_url": webhook_url
         }
 
     except Exception as e:
