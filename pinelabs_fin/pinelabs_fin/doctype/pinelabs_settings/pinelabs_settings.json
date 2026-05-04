@@ -64,7 +64,7 @@
    "fieldtype": "Table",
    "label": "Machines",
    "options": "Pinelabs Machine Config",
-   "reqd": 1
+   "reqd": 0
   },
   {
    "fieldname": "section_break_odjq",
