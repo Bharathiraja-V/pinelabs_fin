@@ -5,22 +5,40 @@
  "doctype": "DocType",
  "engine": "InnoDB",
  "field_order": [
+  "basic_setup_section",
   "enabled",
   "machine_configurations_section",
   "machines",
-  "section_break_odjq",
-  "api_endpoints",
-  "section_break_ullw",
+  "terminal_routing_mode",
+  "machine_mappings_section",
+  "machine_mappings",
+  "plural_section",
+  "enable_payment_links",
+  "plural_use_sandbox",
+  "column_break_plural",
+  "plural_client_id",
+  "plural_client_secret",
+  "plural_base_url",
+  "payment_link_webhook_secret",
   "webhooks_url",
-  "column_break_gfzq",
   "last_sync",
-  "advanced_settings_section",
+  "payable_documents_section",
+  "payable_doctypes",
+  "technical_section",
+  "api_endpoints",
+  "verify_ssl",
+  "debug_mode",
   "auto_cancel_duration_minutes"
  ],
  "fields": [
   {
+   "fieldname": "basic_setup_section",
+   "fieldtype": "Section Break",
+   "label": "Basic Setup"
+  },
+  {
    "default": "0",
-   "description": "Enable Pine Labs payment integration",
+   "description": "Master switch for the Pine Labs integration.",
    "fieldname": "enabled",
    "fieldtype": "Check",
    "label": "Enabled"
@@ -28,55 +46,145 @@
   {
    "fieldname": "machine_configurations_section",
    "fieldtype": "Section Break",
-   "label": "Machine Configurations"
+   "label": "Machines"
   },
   {
-   "description": "Configure Pine Labs machines with their respective credentials",
+   "description": "Configure Pine Labs machines with their credentials. Mark exactly one as Is Default.",
    "fieldname": "machines",
    "fieldtype": "Table",
    "label": "Machines",
-   "options": "Pinelabs Machine Config",
+   "options": "Pinelabs Machine Config"
+  },
+  {
+   "default": "Single Machine",
+   "description": "Single Machine: every transaction uses the row marked Is Default. Mapping: consults the Machine Mappings table below by context (user / warehouse / company / POS profile), falling back to Is Default when no mapping matches.",
+   "fieldname": "terminal_routing_mode",
+   "fieldtype": "Select",
+   "label": "Terminal Routing Mode",
+   "options": "Single Machine\nMapping",
    "reqd": 1
   },
   {
-   "fieldname": "section_break_odjq",
+   "depends_on": "eval:doc.terminal_routing_mode == 'Mapping'",
+   "fieldname": "machine_mappings_section",
    "fieldtype": "Section Break",
-   "label": "API Endpoints"
+   "label": "Machine Mappings"
   },
   {
+   "description": "Routing rules used when Terminal Routing Mode is Mapping. Each row says: when context X matches (User / Warehouse / Company / POS Profile), route to machine Y at priority Z. Lower priority wins; alphabetical tie-break on machine name.",
+   "fieldname": "machine_mappings",
+   "fieldtype": "Table",
+   "label": "Machine Mappings",
+   "options": "Pinelabs Machine Mapping"
+  },
+  {
+   "fieldname": "plural_section",
+   "fieldtype": "Section Break",
+   "label": "Payment Links (Plural)"
+  },
+  {
+   "default": "0",
+   "description": "Enable Plural payment-link generation. Required for the 'Send Payment Link' button.",
+   "fieldname": "enable_payment_links",
+   "fieldtype": "Check",
+   "label": "Enable Payment Links"
+  },
+  {
+   "default": "1",
+   "description": "Use Plural UAT (sandbox) endpoints. Uncheck for production.",
+   "fieldname": "plural_use_sandbox",
+   "fieldtype": "Check",
+   "label": "Use Plural Sandbox"
+  },
+  {
+   "fieldname": "column_break_plural",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "enable_payment_links",
+   "fieldname": "plural_client_id",
+   "fieldtype": "Data",
+   "label": "Plural Client ID",
+   "mandatory_depends_on": "enable_payment_links"
+  },
+  {
+   "depends_on": "enable_payment_links",
+   "fieldname": "plural_client_secret",
+   "fieldtype": "Password",
+   "label": "Plural Client Secret",
+   "mandatory_depends_on": "enable_payment_links"
+  },
+  {
+   "depends_on": "enable_payment_links",
+   "description": "Optional override. Leave blank to use sandbox/production defaults.",
+   "fieldname": "plural_base_url",
+   "fieldtype": "Data",
+   "label": "Plural Base URL Override"
+  },
+  {
+   "depends_on": "enable_payment_links",
+   "description": "Plural webhook signing secret. Used to validate inbound X-Verify HMAC. Min 16 characters.",
+   "fieldname": "payment_link_webhook_secret",
+   "fieldtype": "Password",
+   "label": "Payment Link Webhook Secret",
+   "mandatory_depends_on": "enable_payment_links"
+  },
+  {
+   "depends_on": "enable_payment_links",
+   "description": "Configure this URL in the Plural dashboard. Format: {site}/api/method/pinelabs_fin.api.webhook.handle_webhook",
+   "fieldname": "webhooks_url",
+   "fieldtype": "Data",
+   "label": "Webhook URL (read-only)",
+   "read_only": 1
+  },
+  {
+   "depends_on": "enable_payment_links",
+   "description": "Last webhook received timestamp.",
+   "fieldname": "last_sync",
+   "fieldtype": "Datetime",
+   "label": "Last Sync",
+   "read_only": 1
+  },
+  {
+   "fieldname": "payable_documents_section",
+   "fieldtype": "Section Break",
+   "label": "Payable Documents"
+  },
+  {
+   "description": "Document types that show the Pine Labs payment buttons. Payment Entry is not allowed here.",
+   "fieldname": "payable_doctypes",
+   "fieldtype": "Table",
+   "label": "Payable Doctypes",
+   "options": "Pinelabs Payable Doctype"
+  },
+  {
+   "fieldname": "technical_section",
+   "fieldtype": "Section Break",
+   "label": "Technical"
+  },
+  {
+   "description": "Override Pine Labs API endpoints. Leave empty to use defaults.",
    "fieldname": "api_endpoints",
    "fieldtype": "Table",
    "label": "API Endpoints",
    "options": "Pinelabs API Endpoints"
   },
   {
-   "fieldname": "section_break_ullw",
-   "fieldtype": "Section Break",
-   "label": "Webhook Configuration"
+   "default": "1",
+   "description": "Verify TLS certificates on outbound API calls. Disable only for local simulators.",
+   "fieldname": "verify_ssl",
+   "fieldtype": "Check",
+   "label": "Verify SSL"
   },
   {
-   "description": "URL to configure in Pine Labs dashboard for payment notifications",
-   "fieldname": "webhooks_url",
-   "fieldtype": "Data",
-   "label": "Webhooks URL"
+   "default": "0",
+   "description": "Log full request/response payloads for every API call. Noisy; use only when troubleshooting.",
+   "fieldname": "debug_mode",
+   "fieldtype": "Check",
+   "label": "Debug Mode"
   },
   {
-   "fieldname": "column_break_gfzq",
-   "fieldtype": "Column Break"
-  },
-  {
-   "description": "Last webhook received timestamp",
-   "fieldname": "last_sync",
-   "fieldtype": "Datetime",
-   "label": "Last Sync"
-  },
-  {
-   "fieldname": "advanced_settings_section",
-   "fieldtype": "Section Break",
-   "label": "Advanced Settings"
-  },
-  {
-   "description": "Auto-cancel pending transactions after this many minutes (sent to Pine Labs as AutoCancelDurationInMinutes). Used when machine row override is 0 or empty. If unset or 0, default is 3.",
+   "description": "Auto-cancel pending transactions after this many minutes. Default 3 if 0/empty.",
    "fieldname": "auto_cancel_duration_minutes",
    "fieldtype": "Int",
    "label": "Auto Cancel Duration (Minutes)"
@@ -86,7 +194,7 @@
  "index_web_pages_for_search": 1,
  "issingle": 1,
  "links": [],
- "modified": "2026-03-30 19:44:48.906862",
+ "modified": "2026-05-06 00:00:00.000000",
  "modified_by": "Administrator",
  "module": "Pinelabs Fin",
  "name": "Pinelabs Settings",

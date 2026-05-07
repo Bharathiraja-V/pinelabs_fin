@@ -5,10 +5,6 @@ app_description = "pine"
 app_email = "pinelab12@gmail.com"
 app_license = "mit"
 
-fin_pos_terminal_payment_handlers = [
-	"pinelabs_fin.api.fin_pos_terminal_handler.PinelabsFinPosTerminalHandler"
-]
-
 # Apps
 # ------------------
 
@@ -30,7 +26,7 @@ fin_pos_terminal_payment_handlers = [
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/pinelabs_fin/css/pinelabs_fin.css"
-# app_include_js = "/assets/pinelabs_fin/js/pinelabs_fin.js"
+app_include_js = ["/assets/pinelabs_fin/js/pinelabs_buttons.js"]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/pinelabs_fin/css/pinelabs_fin.css"
@@ -152,23 +148,16 @@ fin_pos_terminal_payment_handlers = [
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"pinelabs_fin.tasks.all"
-# 	],
-# 	"daily": [
-# 		"pinelabs_fin.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"pinelabs_fin.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"pinelabs_fin.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"pinelabs_fin.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+	"cron": {
+		# Reconcile any PENDING Terminal transactions with Pine Labs every minute.
+		# Catches transactions whose user closed the dialog/browser before the
+		# foreground poll saw a terminal state.
+		"* * * * *": [
+			"pinelabs_fin.api.terminal.reconcile_pending_terminal_payments",
+		],
+	},
+}
 
 # Testing
 # -------

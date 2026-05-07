@@ -7,7 +7,6 @@
  "engine": "InnoDB",
  "field_order": [
   "machine_name",
-  "warehouse",
   "merchant_id",
   "client_id",
   "security_token",
@@ -15,6 +14,7 @@
   "device_number",
   "auto_cancel_duration_in_minutes",
   "enabled",
+  "is_default",
   "description"
  ],
  "fields": [
@@ -25,14 +25,6 @@
    "in_list_view": 1,
    "label": "Machine Name",
    "reqd": 1
-  },
-  {
-   "description": "Warehouse associated with this machine (optional - for warehouse-based machine selection)",
-   "fieldname": "warehouse",
-   "fieldtype": "Link",
-   "in_list_view": 1,
-   "label": "Warehouse",
-   "options": "Warehouse"
   },
   {
    "description": "Pine Labs Merchant ID",
@@ -84,7 +76,16 @@
    "description": "Enable this machine configuration",
    "fieldname": "enabled",
    "fieldtype": "Check",
+   "in_list_view": 1,
    "label": "Enabled"
+  },
+  {
+   "default": "0",
+   "description": "Default machine used when no warehouse/user routing applies. Exactly one machine should have this set.",
+   "fieldname": "is_default",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Is Default"
   },
   {
    "description": "Optional description for this machine",

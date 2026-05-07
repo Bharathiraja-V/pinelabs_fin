@@ -4,3 +4,5 @@
 
 [post_model_sync]
 # Patches added in this section will be executed after doctypes are migrated
+pinelabs_fin.patches.install_pinelabs_modes
+pinelabs_fin.patches.migrate_machine_warehouse_to_mapping
