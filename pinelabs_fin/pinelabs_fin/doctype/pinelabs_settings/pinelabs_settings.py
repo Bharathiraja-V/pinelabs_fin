@@ -79,6 +79,44 @@ class PinelabsSettings(Document):
 						_("Payable Doctype {0}: with Create Payment Entry unchecked, both Status Field and Paid Status Value are required.").format(doctype)
 					)
 
+			self._validate_contact_mapping(row, doctype, "mobile", _("Mobile"))
+			self._validate_contact_mapping(row, doctype, "email", _("Email"))
+
+	def _validate_contact_mapping(self, row, doctype, field_type, label):
+		"""For each contact-field mapping that's been opted into, require its
+		dependent fields. Unset (blank fetch_from) is a valid 'use auto-detect'
+		state and skips validation.
+		"""
+		fetch_from = (row.get(f"{field_type}_fetch_from") or "").strip()
+		if not fetch_from:
+			return
+
+		if fetch_from == "Direct Field":
+			if not (row.get(f"{field_type}_direct_field") or "").strip():
+				frappe.throw(
+					_("Payable Doctype {0}: {1} is set to 'Direct Field' but Field Name is empty.").format(
+						doctype, label
+					),
+				)
+			return
+
+		if fetch_from == "Linked DocType":
+			missing = [
+				name
+				for name, value in (
+					(_("Link Field"), row.get(f"{field_type}_link_field")),
+					(_("Linked DocType"), row.get(f"{field_type}_linked_doctype")),
+					(_("Field in Linked DocType"), row.get(f"{field_type}_linked_field")),
+				)
+				if not (value or "").strip()
+			]
+			if missing:
+				frappe.throw(
+					_("Payable Doctype {0}: {1} is set to 'Linked DocType' but these are empty: {2}.").format(
+						doctype, label, ", ".join(missing)
+					),
+				)
+
 	def _fill_webhook_url(self):
 		"""Populate the read-only webhook URL field from the site URL."""
 		if not cint(self.enable_payment_links):

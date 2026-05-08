@@ -59,7 +59,17 @@ def initiate_payment_link(reference_doctype, reference_name, flow="all_methods",
 
 	customer = _get_customer_details(source_doc)
 	if not (customer.get("email_id") or customer.get("mobile_number")):
-		frappe.throw(_("Customer email or mobile is required to send a payment link."))
+		from pinelabs_fin.api.customer_contact import describe_resolution
+
+		trace = describe_resolution(source_doc)
+		frappe.throw(
+			_("Customer email or mobile is required to send a payment link.")
+			+ "<br><br>"
+			+ _("Resolver trace (see Pinelabs Settings → Payable Documents → Customer Contact Field Mapping):")
+			+ "<pre style='white-space:pre-wrap;'>"
+			+ frappe.utils.escape_html(frappe.as_json(trace, indent=2))
+			+ "</pre>",
+		)
 
 	# Prevent concurrent attempts on the same doc.
 	existing = txn_service.get_active_for_doc(reference_doctype, reference_name)
@@ -283,11 +293,23 @@ def _build_seamless_nb_payload(*, merchant_ref, amount, customer, bank_code):
 
 
 def _get_customer_details(doc):
-	mobile = doc.get("contact_mobile") or doc.get("mobile_no") or doc.get("phone")
-	email = doc.get("contact_email") or doc.get("email_id") or doc.get("email")
+	# Priority 1: explicit per-doctype mapping configured in Pinelabs Settings →
+	# Payable Doctypes → Customer Contact Field Mapping. Empty-string returns
+	# from the resolver mean "not configured / not found", so we still fall
+	# through to the auto-detect chain below.
+	from pinelabs_fin.api.customer_contact import resolve_from_config
+
+	configured = resolve_from_config(doc)
+	mobile = configured.get("mobile") or None
+	email = configured.get("email") or None
+
+	# Priority 2: well-known direct fields on the source doc.
+	mobile = mobile or doc.get("contact_mobile") or doc.get("mobile_no") or doc.get("phone")
+	email = email or doc.get("contact_email") or doc.get("email_id") or doc.get("email")
 	name = doc.get("customer_name") or doc.get("party_name") or doc.get("contact_display") or doc.get("full_name")
 	country_code = doc.get("phone_country_code") or doc.get("country_code") or _DEFAULT_COUNTRY_CODE
 
+	# Priority 3: linked Contact doc (default contact for the customer/party).
 	if not (mobile and email and name):
 		contact = _find_contact(doc)
 		if contact:
