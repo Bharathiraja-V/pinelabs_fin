@@ -134,6 +134,42 @@ def refresh_payment_link_status(transaction_name):
 	return {"success": True, "status": "PENDING", "message": status or "still pending"}
 
 
+def reconcile_pending_plural_payments():
+	"""Cron task — reconcile every PENDING Plural / Direct NB transaction.
+
+	Why this exists: Plural webhooks are the primary signal, but they need a
+	publicly-reachable URL and a configured signing secret. On dev sites, on
+	misconfigured webhooks, or when a webhook delivery is dropped, the
+	transaction would sit at PENDING forever and the user would have to hit
+	the form's manual "Refresh Status" button. This job pulls the status
+	server-side every minute so docs finalize regardless of webhook health.
+
+	Idempotent: piggy-backs on `refresh_payment_link_status`, which routes
+	through `mark_success` / `mark_failed` (both no-op on terminal states).
+	`mark_success` also publishes a realtime event so any open form-view
+	auto-refreshes once we land here. Errors per row are logged but never
+	abort the whole batch.
+	"""
+	rows = frappe.get_all(
+		"Pinelabs Transaction",
+		filters={
+			"flow_type": ["in", ["Plural", "Direct NB"]],
+			"status": "PENDING",
+		},
+		fields=["name"],
+	)
+	for row in rows:
+		try:
+			refresh_payment_link_status(row.name)
+			frappe.db.commit()
+		except Exception:
+			frappe.db.rollback()
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"Pinelabs reconcile_pending_plural_payments failed for {row.name}",
+			)
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Flow implementations
 # ──────────────────────────────────────────────────────────────────────────

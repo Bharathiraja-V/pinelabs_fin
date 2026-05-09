@@ -14,13 +14,12 @@
   "machine_mappings",
   "plural_section",
   "enable_payment_links",
-  "plural_use_sandbox",
-  "column_break_plural",
   "plural_client_id",
   "plural_client_secret",
-  "plural_base_url",
+  "column_break_plural",
   "payment_link_webhook_secret",
-  "webhooks_url",
+  "plural_base_url",
+  "payment_link_expiry_minutes",
   "last_sync",
   "payable_documents_section",
   "payable_doctypes",
@@ -71,16 +70,9 @@
    "label": "Machine Mappings"
   },
   {
-   "description": "Routing rules used when Terminal Routing Mode is Mapping. Each row says: when context X matches (User / Warehouse / Company / POS Profile), route to machine Y at priority Z. Lower priority wins; alphabetical tie-break on machine name.",
-   "fieldname": "machine_mappings",
-   "fieldtype": "Table",
-   "label": "Machine Mappings",
-   "options": "Pinelabs Machine Mapping"
-  },
-  {
    "fieldname": "plural_section",
    "fieldtype": "Section Break",
-   "label": "Payment Links (Plural)"
+   "label": "Plural API Configuration"
   },
   {
    "default": "0",
@@ -90,18 +82,8 @@
    "label": "Enable Payment Links"
   },
   {
-   "default": "1",
-   "description": "Use Plural UAT (sandbox) endpoints. Uncheck for production.",
-   "fieldname": "plural_use_sandbox",
-   "fieldtype": "Check",
-   "label": "Use Plural Sandbox"
-  },
-  {
-   "fieldname": "column_break_plural",
-   "fieldtype": "Column Break"
-  },
-  {
    "depends_on": "enable_payment_links",
+   "description": "Provided by Pine Labs during merchant onboarding.",
    "fieldname": "plural_client_id",
    "fieldtype": "Data",
    "label": "Plural Client ID",
@@ -109,6 +91,7 @@
   },
   {
    "depends_on": "enable_payment_links",
+   "description": "Keep this secret. Never share or expose it on the frontend.",
    "fieldname": "plural_client_secret",
    "fieldtype": "Password",
    "label": "Plural Client Secret",
@@ -116,26 +99,30 @@
   },
   {
    "depends_on": "enable_payment_links",
-   "description": "Optional override. Leave blank to use sandbox/production defaults.",
-   "fieldname": "plural_base_url",
-   "fieldtype": "Data",
-   "label": "Plural Base URL Override"
-  },
-  {
-   "depends_on": "enable_payment_links",
-   "description": "Plural webhook signing secret. Used to validate inbound X-Verify HMAC. Min 16 characters.",
+   "description": "Used to validate incoming webhook signatures from Pine Labs (x-verify header). Min 16 characters.",
    "fieldname": "payment_link_webhook_secret",
    "fieldtype": "Password",
-   "label": "Payment Link Webhook Secret",
+   "label": "Webhook Secret (HMAC)",
    "mandatory_depends_on": "enable_payment_links"
   },
   {
+   "fieldname": "column_break_plural",
+   "fieldtype": "Column Break"
+  },
+  {
    "depends_on": "enable_payment_links",
-   "description": "Configure this URL in the Plural dashboard. Format: {site}/api/method/pinelabs_fin.api.webhook.handle_webhook",
-   "fieldname": "webhooks_url",
+   "description": "Plural API base URL. Sandbox: https://pluraluat.v2.pinepg.in | Production: https://api.pluralpay.in | Local simulator: http://127.0.0.1:5000. Auto-fills with the sandbox URL on save when left blank.",
+   "fieldname": "plural_base_url",
    "fieldtype": "Data",
-   "label": "Webhook URL (read-only)",
-   "read_only": 1
+   "label": "Plural API Base URL"
+  },
+  {
+   "default": "1440",
+   "depends_on": "enable_payment_links",
+   "description": "How long the generated payment link stays valid. Default 1440 minutes (24 hours). Must be > 0.",
+   "fieldname": "payment_link_expiry_minutes",
+   "fieldtype": "Int",
+   "label": "Payment Link Expiry (Minutes)"
   },
   {
    "depends_on": "enable_payment_links",
@@ -144,6 +131,13 @@
    "fieldtype": "Datetime",
    "label": "Last Sync",
    "read_only": 1
+  },
+  {
+   "description": "Routing rules used when Terminal Routing Mode is Mapping. Each row says: when context X matches (User / Warehouse / Company / POS Profile), route to machine Y at priority Z. Lower priority wins; alphabetical tie-break on machine name.",
+   "fieldname": "machine_mappings",
+   "fieldtype": "Table",
+   "label": "Machine Mappings",
+   "options": "Pinelabs Machine Mapping"
   },
   {
    "fieldname": "payable_documents_section",

@@ -1094,14 +1094,29 @@ class PineLabsClient:
     # Plural API plumbing (Pay-by-Link + seamless Net Banking)
     # ─────────────────────────────────────────────────────────────────────
 
+    # Canonical Plural API hosts. Single source of truth — referenced by
+    # the controller's auto-fill, by site_config overrides, and by the
+    # Test Connection helper.
+    PLURAL_SANDBOX_URL = "https://pluraluat.v2.pinepg.in"
+    PLURAL_PRODUCTION_URL = "https://api.pluralpay.in"
+
     def _get_plural_base_url(self):
-        if cint(getattr(self.settings, "plural_use_sandbox", 1)):
-            base_url = "https://pluraluat.v2.pinepg.in"
-        else:
-            base_url = "https://api.pluralpay.in"
-        base_url = (getattr(self.settings, "plural_base_url", None) or "").strip() or base_url
-        base_url = frappe.conf.get("pine_plural_base_url") or base_url
-        return base_url.rstrip("/")
+        """Resolve the Plural base URL.
+
+        Priority: Settings.plural_base_url (typed by the user) >
+                  site_config `pine_plural_base_url` >
+                  sandbox default.
+        The Settings field is editable, so a value typed there is the
+        single source of truth. site_config remains as a deploy-time
+        fallback for environments where the DB row isn't seeded.
+        """
+        typed = (getattr(self.settings, "plural_base_url", None) or "").strip()
+        if typed:
+            return typed.rstrip("/")
+        site_override = (frappe.conf.get("pine_plural_base_url") or "").strip()
+        if site_override:
+            return site_override.rstrip("/")
+        return self.PLURAL_SANDBOX_URL.rstrip("/")
 
     def _get_plural_credentials(self):
         """Resolve Plural credentials with priority: Settings > site_config."""
@@ -1166,7 +1181,11 @@ class PineLabsClient:
         if not token:
             return None, data.get("message") or _("Failed to obtain Plural access token")
 
+        # Cap the cache TTL at 3500s — well under Plural's 60-min token
+        # lifetime even when their `expires_in` says 3600+. Avoids the edge
+        # case where a token expires mid-request and we hit a 401.
         expires_in = max(int(data.get("expires_in") or 3600) - 60, 60)
+        expires_in = min(expires_in, 3500)
         frappe.cache().set_value("pine_plural_access_token", token, expires_in_sec=expires_in)
         return token, None
 

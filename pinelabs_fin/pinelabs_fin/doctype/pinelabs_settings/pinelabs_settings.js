@@ -1,6 +1,56 @@
 // Copyright (c) 2026, pine and contributors
 // For license information, please see license.txt
 
+// ─────────────────────────────────────────────────────────────────────────
+// Pinelabs Settings form — Plural API Test Connection button
+// ─────────────────────────────────────────────────────────────────────────
+
+frappe.ui.form.on("Pinelabs Settings", {
+	refresh(frm) {
+		render_plural_test_button(frm);
+	},
+	plural_client_id(frm) {
+		render_plural_test_button(frm);
+	},
+	enable_payment_links(frm) {
+		render_plural_test_button(frm);
+	},
+});
+
+function render_plural_test_button(frm) {
+	const label = __("Test Plural Connection");
+	frm.remove_custom_button(label);
+	if (!frm.doc.enable_payment_links) return;
+	if (!(frm.doc.plural_client_id || "").trim()) return;
+
+	frm.add_custom_button(label, () => run_plural_connection_test(frm));
+}
+
+function run_plural_connection_test(frm) {
+	if (frm.is_dirty()) {
+		frappe.show_alert({
+			message: __("Save Pinelabs Settings before testing — unsaved credential changes won't be used."),
+			indicator: "orange",
+		});
+		return;
+	}
+	frappe.call({
+		method: "pinelabs_fin.api.config.test_plural_connection",
+		freeze: true,
+		freeze_message: __("Contacting Plural..."),
+		callback(r) {
+			const msg = r.message || {};
+			const indicator = msg.success ? "green" : "red";
+			const prefix = msg.success ? "✅" : "❌";
+			frappe.msgprint({
+				title: __("Plural Connection Test"),
+				message: `${prefix} ${frappe.utils.escape_html(msg.message || "")}`,
+				indicator,
+			});
+		},
+	});
+}
+
 const PINELABS_MAPPING_TYPE_TO_DOCTYPE = {
 	User: "User",
 	Warehouse: "Warehouse",

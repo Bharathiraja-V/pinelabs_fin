@@ -6,19 +6,29 @@ from __future__ import unicode_literals
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import cint, get_url
+from frappe.utils import cint
 
 
 _MIN_WEBHOOK_SECRET_LEN = 16
+# Watched fields — when any of these change, the Plural OAuth token cache must
+# be cleared so the next call fetches a fresh token against the new identity.
+_PLURAL_CACHE_BUSTING_FIELDS = (
+	"plural_client_id",
+	"plural_client_secret",
+	"plural_base_url",
+)
 
 
 class PinelabsSettings(Document):
 	def validate(self):
 		self._auto_default_only_machine()
 		self._validate_one_default_machine()
+		self._resolve_plural_base_url()
 		self._validate_plural_credentials()
 		self._validate_payable_doctypes()
-		self._fill_webhook_url()
+
+	def on_update(self):
+		self._maybe_bust_plural_token_cache()
 
 	def _auto_default_only_machine(self):
 		"""When a single machine row exists, force is_default = 1 on it."""
@@ -52,10 +62,58 @@ class PinelabsSettings(Document):
 			secret = None
 		if secret and len(secret) < _MIN_WEBHOOK_SECRET_LEN:
 			frappe.throw(
-				_("Payment Link Webhook Secret must be at least {0} characters for security.").format(
+				_("Webhook Secret (HMAC) must be at least {0} characters for security.").format(
 					_MIN_WEBHOOK_SECRET_LEN
 				)
 			)
+
+		# Expiry must be positive when present.
+		expiry = cint(getattr(self, "payment_link_expiry_minutes", 0))
+		if expiry and expiry <= 0:
+			frappe.throw(_("Payment Link Expiry (Minutes) must be greater than 0."))
+
+	def _resolve_plural_base_url(self):
+		"""Auto-fill plural_base_url when the user leaves it blank.
+
+		The field is editable — a typed value is preserved. We only fill
+		blanks, picking the first available source: site_config override
+		(`pine_plural_base_url`) → sandbox default. URL is normalised
+		(trailing slash trimmed) so calls don't end up double-slashed.
+		"""
+		if not cint(self.enable_payment_links):
+			return
+		from pinelabs_fin.api.pinelabs_client import PineLabsClient
+
+		typed = (self.plural_base_url or "").strip()
+		if typed:
+			self.plural_base_url = typed.rstrip("/")
+			return
+
+		site_override = (frappe.conf.get("pine_plural_base_url") or "").strip()
+		if site_override:
+			self.plural_base_url = site_override.rstrip("/")
+			return
+		self.plural_base_url = PineLabsClient.PLURAL_SANDBOX_URL
+
+	def _maybe_bust_plural_token_cache(self):
+		"""Clear the cached OAuth token if any identity-bearing field changed.
+
+		on_update fires after the DB write, so `self._doc_before_save` holds
+		the previous values. Comparing each field surfaces an environment
+		switch, a credential rotation, or a base-URL override change — any
+		of which would make the previously-issued token invalid for the
+		next API call.
+		"""
+		before = getattr(self, "_doc_before_save", None)
+		if before is None:
+			# First save / patch context — nothing to compare; clear anyway
+			# since callers have no way to know whether identity changed.
+			frappe.cache().delete_value("pine_plural_access_token")
+			return
+		for field in _PLURAL_CACHE_BUSTING_FIELDS:
+			if (getattr(self, field, None) or "") != (getattr(before, field, None) or ""):
+				frappe.cache().delete_value("pine_plural_access_token")
+				return
 
 	def _validate_payable_doctypes(self):
 		"""Require amount_field, no duplicates, and mapped-status fields when
@@ -116,19 +174,6 @@ class PinelabsSettings(Document):
 						doctype, label, ", ".join(missing)
 					),
 				)
-
-	def _fill_webhook_url(self):
-		"""Populate the read-only webhook URL field from the site URL."""
-		if not cint(self.enable_payment_links):
-			return
-		try:
-			self.webhooks_url = get_url(
-				"/api/method/pinelabs_fin.api.webhook.handle_webhook"
-			)
-		except Exception:
-			# Outside a request context (e.g. patches) we leave whatever was there.
-			pass
-
 
 def get_default_machine_config():
 	"""Return the default Pinelabs Machine Config row, or None if not configured."""

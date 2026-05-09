@@ -150,11 +150,14 @@ app_include_js = ["/assets/pinelabs_fin/js/pinelabs_buttons.js"]
 
 scheduler_events = {
 	"cron": {
-		# Reconcile any PENDING Terminal transactions with Pine Labs every minute.
-		# Catches transactions whose user closed the dialog/browser before the
-		# foreground poll saw a terminal state.
+		# Reconcile any PENDING transactions with Pine Labs every minute.
+		# - Terminal: catches users who closed the dialog before the foreground
+		#   poll saw a terminal state.
+		# - Plural / Direct NB: catches missed webhooks (no public URL, dropped
+		#   delivery, secret mismatch, …) so doc finalizes without manual click.
 		"* * * * *": [
 			"pinelabs_fin.api.terminal.reconcile_pending_terminal_payments",
+			"pinelabs_fin.api.plural.reconcile_pending_plural_payments",
 		],
 	},
 }

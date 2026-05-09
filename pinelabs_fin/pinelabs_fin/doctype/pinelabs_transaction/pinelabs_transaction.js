@@ -6,8 +6,53 @@ frappe.ui.form.on("Pinelabs Transaction", {
 	refresh(frm) {
 		render_status_indicator(frm);
 		render_buttons(frm);
+		setup_realtime_autoreload(frm);
+	},
+	onload(frm) {
+		// New record being viewed — also subscribe straight away. (`refresh`
+		// fires after onload but we keep both for safety in case the form is
+		// re-rendered without onload.)
+		setup_realtime_autoreload(frm);
 	},
 });
+
+// ─────────────────────────────────────────────────────────────────────────
+// Auto-reload on status transitions
+//
+// Server-side `transaction._publish_status_update` broadcasts a
+// `pinelabs_txn_update` socket event after every commit on a transition
+// (mark_pending / mark_success / mark_failed / mark_cancelled). The cron
+// reconcile (every minute), the foreground poll, and the webhook all flow
+// through that same publisher — so subscribing here means the open form
+// reflects the latest state without the user clicking Refresh Status.
+// ─────────────────────────────────────────────────────────────────────────
+
+function setup_realtime_autoreload(frm) {
+	if (frm.is_new()) return;
+	// Tear down any previous subscription before adding a new one — avoids
+	// stacking handlers when the form re-renders.
+	if (frm.__pinelabs_txn_handler) {
+		frappe.realtime.off("pinelabs_txn_update", frm.__pinelabs_txn_handler);
+	}
+	const handler = (data) => {
+		if (!data || data.transaction_name !== frm.doc.name) return;
+		if (data.status === frm.doc.status && data.payment_entry === frm.doc.payment_entry) {
+			return;
+		}
+		frm.reload_doc();
+		const indicator = data.status === "SUCCESS"
+			? "green"
+			: data.status === "FAILED" || data.status === "CANCELLED"
+				? "red"
+				: "blue";
+		frappe.show_alert({
+			message: __("Status updated: {0}", [data.status]),
+			indicator,
+		});
+	};
+	frappe.realtime.on("pinelabs_txn_update", handler);
+	frm.__pinelabs_txn_handler = handler;
+}
 
 function render_status_indicator(frm) {
 	if (!frm.doc.status) return;
