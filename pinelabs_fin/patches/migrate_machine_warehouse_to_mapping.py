@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2026, Pinelabs Fin contributors
 # For license information, please see license.txt
 
@@ -25,10 +24,7 @@ Runs ``post_model_sync`` so:
   - The Settings doctype has the ``machine_mappings`` field defined.
 """
 
-from __future__ import unicode_literals
-
 import frappe
-
 
 PARENT_DOCTYPE = "Pinelabs Settings"
 PARENT_FIELD = "machine_mappings"
@@ -235,12 +231,12 @@ def _insert_child_mapping(*, machine, mapping_type, reference_doctype, reference
 			(name, creation, modified, modified_by, owner,
 			 parent, parenttype, parentfield, idx,
 			 mapping_type, reference_doctype, reference_name,
-			 machine, priority, is_enabled, description)
+			 machine, is_enabled, description)
 		VALUES
 			(%s, %s, %s, %s, %s,
 			 %s, %s, %s, %s,
 			 %s, %s, %s,
-			 %s, %s, %s, %s)
+			 %s, %s, %s)
 		""",
 		(
 			name,
@@ -256,7 +252,6 @@ def _insert_child_mapping(*, machine, mapping_type, reference_doctype, reference
 			reference_doctype,
 			reference_name,
 			machine,
-			100,
 			1,
 			description,
 		),

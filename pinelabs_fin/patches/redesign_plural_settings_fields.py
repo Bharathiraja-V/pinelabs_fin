@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2026, Pinelabs Fin contributors
 # For license information, please see license.txt
 
@@ -19,10 +18,7 @@ migration is just row INSERTs and DELETEs.
 Idempotent: skips rows already migrated, no-op on a fresh install.
 """
 
-from __future__ import unicode_literals
-
 import frappe
-
 
 DOCTYPE = "Pinelabs Settings"
 

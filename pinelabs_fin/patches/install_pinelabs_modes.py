@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2026, Pinelabs Fin contributors
 # For license information, please see license.txt
 
@@ -11,11 +10,8 @@ Mode of Payment is the new source of truth for "which Pine Labs payment
 methods exist and how they route" — Settings no longer carries that list.
 """
 
-from __future__ import unicode_literals
-
 import frappe
 from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
-
 
 PINELABS_MOP_FIELDS = {
 	"Mode of Payment": [

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2026, Pinelabs Fin contributors
 # For license information, please see license.txt
 
@@ -16,13 +15,11 @@ The resolver never raises on missing values — callers decide whether to
 fall back to a generic auto-detect or surface a "missing contact" error.
 """
 
-from __future__ import unicode_literals
-
 import frappe
 from frappe.utils import cint
 
 
-def resolve_from_config(doc):
+def resolve_from_config(doc) -> dict[str, str]:
 	"""Return a {"mobile": str, "email": str} dict from the configured mapping.
 
 	Both values default to "" when:
@@ -42,7 +39,7 @@ def resolve_from_config(doc):
 	}
 
 
-def describe_resolution(doc):
+def describe_resolution(doc) -> dict:
 	"""Return a verbose trace of what the resolver tried, for error messages.
 
 	Each field gets a one-line dict explaining where the value came from
@@ -191,7 +188,7 @@ _REFERENCE_FIELDTYPES = ("Data", "Link", "Small Text")
 
 
 @frappe.whitelist()
-def list_doctype_fields(doctype):
+def list_doctype_fields(doctype: str) -> dict:
 	"""Return the cascading-mapping field lists for a doctype.
 
 	Output shape:
@@ -279,7 +276,7 @@ def list_doctype_fields(doctype):
 
 
 @frappe.whitelist()
-def get_link_field_target(doctype, fieldname):
+def get_link_field_target(doctype: str, fieldname: str) -> str:
 	"""Return the target doctype for a Link field on `doctype`.
 
 	Returns "" for Dynamic Link (target lives in another field; the user

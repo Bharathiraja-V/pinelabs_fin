@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2026, Pinelabs Fin contributors
 # For license information, please see license.txt
 
@@ -10,14 +9,12 @@ and returns success/failure to the caller; the button surfaces the
 result via a dialog.
 """
 
-from __future__ import unicode_literals
-
 import frappe
 from frappe import _
 
 
 @frappe.whitelist()
-def test_plural_connection():
+def test_plural_connection() -> dict:
 	"""Try to obtain a Plural OAuth token using the saved credentials.
 
 	Returns:
@@ -27,7 +24,7 @@ def test_plural_connection():
 	      "expires_in_seconds": int  # only set on success
 	    }
 	"""
-	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
+	from pinelabs_fin.api.plural_client import get_plural_client
 
 	# Force a fresh fetch — a cached token from before the user updated
 	# credentials would mask a misconfig. Token is re-cached on success.
@@ -41,12 +38,12 @@ def test_plural_connection():
 		return {"success": False, "message": _("Plural Client ID is empty. Save the Settings form first.")}
 
 	try:
-		client = get_pinelabs_client()
+		client = get_plural_client()
 	except Exception as e:
-		return {"success": False, "message": _("Could not initialise Pine Labs client: {0}").format(str(e))}
+		return {"success": False, "message": _("Could not initialise Plural client: {0}").format(str(e))}
 
 	try:
-		token, error = client._get_plural_access_token()
+		token, error = client.get_access_token()
 	except Exception as e:
 		return {"success": False, "message": _("Token request raised: {0}").format(str(e))}
 

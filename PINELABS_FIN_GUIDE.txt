@@ -1,0 +1,779 @@
+================================================================================
+                          PINELABS_FIN — FULL APP GUIDE
+================================================================================
+
+This document is the single reference for the pinelabs_fin Frappe app. Reading
+it end-to-end gives a complete picture: what the app does, why it exists, how
+it is structured, how to configure it, how to use it day-to-day, how to debug
+it, and what known sharp edges to avoid.
+
+Last updated: 2026-05-09
+Branch covered: phase-1-rewrite (post Phase 1 + Phase 2 + Pay-by-Link logging)
+
+
+================================================================================
+1. WHAT THIS APP IS
+================================================================================
+
+pinelabs_fin is a Frappe / ERPNext app that integrates Pine Labs payments into
+ERPNext. It adds two buttons to "payable" documents (Sales Invoice, POS
+Invoice, Payment Request, etc.):
+
+  - "Pay on Machine"   → routes a payment to a physical Pine Labs Cloud
+                         terminal (card / UPI on the device).
+  - "Send Payment Link" → generates a single Plural hosted payment link
+                         that covers every method enabled in the Plural
+                         dashboard (card, UPI, net banking, wallets).
+                         The customer pays via SMS/Email link.
+
+Once payment completes, the app creates an ERPNext Payment Entry against the
+source document automatically — no manual reconciliation needed.
+
+The app is designed to be marketplace-clean: zero custom fields on ERPNext
+core doctypes (Sales Invoice etc. stay untouched). All configuration lives in
+Pinelabs Settings; all per-transaction state lives in the new Pinelabs
+Transaction doctype.
+
+
+================================================================================
+2. PURPOSE / WHY IT EXISTS
+================================================================================
+
+Merchants using ERPNext + Pine Labs hardware (or merchants using ERPNext who
+need Plural Pay-by-Link to collect online) previously had to:
+
+  - manually copy invoice references between systems,
+  - manually mark invoices paid in ERPNext after a customer paid online,
+  - reconcile Pine Labs settlement reports back to invoices by hand.
+
+This app removes all three. The merchant clicks one button on the invoice;
+the app handles the API call, the customer flow, the webhook, and the
+Payment Entry creation. End-to-end automation, with idempotent webhook
+handling and a per-minute reconcile cron as a backstop.
+
+
+================================================================================
+3. THE THREE PAYMENT FLOWS
+================================================================================
+
+Internally the app supports two flows, both funneling into the same
+Pinelabs Transaction record + Payment Entry result:
+
+3.1 TERMINAL (Pay on Machine)
+    - Button: "Pay on Machine"
+    - HTTP layer: pinelabs_fin/api/pinelabs_client.py (Pine Labs Cloud API)
+    - Orchestration: pinelabs_fin/api/terminal.py
+    - Source of completion: foreground 3-second poll on the dialog (UI),
+      backed by realtime events and the 1-minute reconcile cron.
+    - Customer action: tap card / scan UPI on the physical device.
+
+3.2 PAY-BY-LINK (Send Payment Link)
+    - Button: "Send Payment Link" — no per-method dialog, every click
+      generates an "all methods" hosted link.
+    - HTTP layer: pinelabs_fin/api/plural_client.py (Plural Pay-by-Link API)
+    - Orchestration: pinelabs_fin/api/plural.py
+    - Source of completion: webhook from Plural (push) +
+      pinelabs_fin/api/webhook.py for the receiver, backed by the 1-minute
+      reconcile cron pulling status as a fallback.
+    - Customer action: open SMS/Email link → pick any method on Plural's
+      hosted page (card / UPI / net banking / wallet — whatever's
+      enabled in the Plural dashboard).
+
+
+================================================================================
+4. ARCHITECTURE OVERVIEW
+================================================================================
+
+4.1 Single source of truth — Pinelabs Transaction
+    Every payment attempt — Terminal, Plural, or Direct NB — creates a
+    Pinelabs Transaction record. It is polymorphic: it has a Dynamic Link
+    (reference_doctype + reference_name) pointing to the source document.
+
+    Status state machine:
+        INITIATED → PENDING → SUCCESS
+                            → FAILED
+                            → CANCELLED
+    No silent transitions. All transitions go through transaction.py.
+
+    Concurrency safety: every status transition first calls
+    `_lock_and_reload(name)` which uses
+    `frappe.db.get_value("Pinelabs Transaction", name, "name", for_update=True)`
+    to take a row-level SELECT FOR UPDATE lock. This serialises concurrent
+    finalize attempts (e.g. webhook + cron + foreground poll all racing).
+
+4.2 Mode of Payment is the SoT for which methods are PineLabs-enabled
+    The install patch (pinelabs_fin/patches/install_pinelabs_modes.py) seeds
+    4 ERPNext "Mode of Payment" records:
+
+        PineLabs - Card        flow=Both    terminal_code=1
+        PineLabs - UPI         flow=Both    terminal_code=11
+        PineLabs - NetBanking  flow=Plural  plural_method=NB
+        PineLabs - Wallet      flow=Plural  plural_method=WALLET
+
+    Each gets 4 custom fields under a "Pine Labs Integration" section:
+        - pinelabs_enabled (Check)
+        - pinelabs_flow_type (Select: Terminal / Plural / Both)
+        - pinelabs_terminal_code (Int — 1=Card, 11=UPI on Pine Labs API)
+        - pinelabs_plural_method (Data — CARD / UPI / NB / WALLET)
+
+    The "Pay on Machine" dialog only lists modes where pinelabs_enabled=1
+    AND pinelabs_flow_type IN ('Terminal','Both'). Disabling a mode hides
+    it from the dialog instantly — no code change.
+
+4.3 Strict Payment Entry creation rules (transaction.py)
+    PE is created ONLY by:
+      - terminal-success path (terminal.py after foreground poll sees SUCCESS)
+      - webhook PROCESSED/SUCCESS/PAID (webhook.py.handle_webhook → mark_success)
+      - cron-driven status check seeing PROCESSED (plural.refresh_payment_link_status)
+
+    Idempotency:
+      - Bail if a PE with reference_no = transaction.payment_id already exists.
+      - Bail if transaction.payment_entry is already populated.
+      - Use erpnext.accounts.doctype.payment_entry.payment_entry.get_payment_entry
+        to build the PE — same helper ERPNext itself uses.
+
+4.4 ZERO custom fields on ERPNext core doctypes
+    No fields are added to Sales Invoice, POS Invoice, Payment Entry, etc.
+    The only custom fields the app installs are on Mode of Payment (see 4.2),
+    which is a configuration doctype, not a transactional one.
+
+
+================================================================================
+5. KEY DOCTYPES
+================================================================================
+
+5.1 Pinelabs Settings (Single)
+    All app configuration. Sections:
+      - Basic Setup       — Enabled toggle, Machines child table, Terminal
+                            Routing Mode (Single Machine / Mapping), Machine
+                            Mappings child table.
+      - Plural API        — Enable Payment Links, Plural Client ID,
+                            Client Secret, Webhook Secret (HMAC), Plural
+                            Base URL (editable, sandbox is the auto-fill),
+                            Payment Link Expiry (Minutes), Last Sync.
+      - Payable Documents — Payable Doctypes child table (per-doctype
+                            eligibility + customer-contact mapping).
+      - Technical         — API Endpoints overrides, Verify SSL, Debug
+                            Mode, Auto Cancel Duration (Minutes).
+
+    Validation enforced in pinelabs_settings.py:
+      - At most one machine may be Is Default. Empty machines table is OK.
+      - Plural credentials + Webhook Secret required when payment links enabled.
+        Webhook secret must be ≥ 16 characters.
+      - Each Payable Doctype row needs amount_field; if "Create Payment
+        Entry" is unchecked, both status_field and paid_status_value are
+        required.
+      - Customer Contact Field Mapping: when fetch_from is set, dependent
+        fields must be populated.
+
+    on_update: bust the cached Plural OAuth token if any of
+    plural_client_id / plural_client_secret / plural_base_url changed —
+    so the next API call fetches a fresh token against the new identity.
+
+5.2 Pinelabs Machine Config (Child of Pinelabs Settings.machines)
+    One row per physical Pine Labs Cloud terminal.
+    Fields:
+      machine_name, client_id, security_token, merchant_id, store_id,
+      terminal_id, device_number, enabled, is_default,
+      auto_cancel_duration_in_minutes
+    The is_default flag is the fallback when Routing Mode = Single Machine
+    AND when Mapping Mode finds no match.
+
+5.3 Pinelabs Machine Mapping (Child of Pinelabs Settings.machine_mappings)
+    Routing rules. Each row maps a context to a machine:
+      machine, mapping_type (User/Warehouse/Company/POS Profile),
+      reference_doctype, reference_name, is_enabled
+    Used only when Routing Mode = Mapping. When more than one row matches
+    the current context, the alphabetically-first machine name wins.
+
+5.4 Pinelabs Payable Doctype (Child of Pinelabs Settings.payable_doctypes)
+    One row per ERPNext doctype that can be paid via PineLabs.
+    Fields:
+      doctype_name, amount_field, status_field, paid_status_value,
+      finalize_via_payment_entry,
+      mobile_fetch_from, mobile_direct_field, mobile_link_field,
+      mobile_linked_doctype, mobile_linked_field,
+      email_fetch_from,  email_direct_field,  email_link_field,
+      email_linked_doctype,  email_linked_field
+    The mapping fields are the dynamic Customer Contact Field Mapping —
+    see section 9.
+
+5.5 Pinelabs Transaction (standalone, one-per-attempt)
+    All transaction state. Fields:
+      reference_doctype, reference_name (Dynamic Link),
+      flow_type (Terminal / Plural),
+      payment_method (CARD / UPI / NB / WALLET),
+      amount, status (INITIATED/PENDING/SUCCESS/FAILED/CANCELLED),
+      machine (link to Machine Config — terminal only),
+      order_id (Plural's order_id / payment_link_id),
+      payment_id (Pine Labs payment reference; written to PE.reference_no),
+      mode_of_payment (resolved at PE time),
+      payment_entry (link to PE; populated after success),
+      request_payload, response_payload (JSON, for debugging),
+      error_message,
+      created_at, completed_at
+
+
+================================================================================
+6. FILE MAP
+================================================================================
+
+Top-level:
+  hooks.py                         — Frappe lifecycle hooks. Wires the
+                                     scheduler cron, fixtures, etc.
+  patches.txt                      — Lists install/migration patches.
+  pyproject.toml                   — Build metadata + ruff config (tabs).
+
+api/ (HTTP / orchestration):
+  transaction.py                   — Core state machine + PE creation.
+  terminal.py                      — Cloud terminal flow (initiate, poll,
+                                     reconcile_pending_terminal_payments).
+  plural.py                        — Plural orchestration (initiate,
+                                     refresh, reconcile_pending_plural_payments,
+                                     handle_quick_nb_callback).
+  plural_client.py                 — Plural HTTP client (OAuth, payment-link
+                                     create/get, seamless NB).
+  pinelabs_client.py               — Pine Labs Cloud HTTP client (terminal).
+  webhook.py                       — Plural webhook receiver
+                                     (HMAC validation, dispatch).
+  customer_contact.py              — Resolves customer email / mobile from
+                                     Pinelabs Payable Doctype config.
+  config.py                        — test_plural_connection (powers the
+                                     "Test Plural Connection" button).
+  test_phase1.py                   — Test suite (state machine, terminal,
+                                     plural, webhook, routing).
+
+doctype/:
+  pinelabs_settings/               — Singleton + controller + form JS.
+  pinelabs_machine_config/         — Cloud terminal credentials child row.
+  pinelabs_machine_mapping/        — Routing rule child row.
+  pinelabs_payable_doctype/        — Eligible doctype child row +
+                                     Customer Contact Field Mapping.
+  pinelabs_transaction/            — Standalone transaction record + form JS.
+  pinelabs_bank/                   — NB bank list.
+
+patches/:
+  install_pinelabs_modes.py            — Seed 4 PineLabs Modes of Payment +
+                                          install custom fields on
+                                          Mode of Payment.
+  migrate_machine_warehouse_to_mapping.py — Phase 2 migration: convert the
+                                          old Machine Config.warehouse value
+                                          into Pinelabs Machine Mapping rows.
+  redesign_plural_settings_fields.py   — Migrate tabSingles rows when
+                                          Plural Settings fields were
+                                          renamed/removed.
+  seed_pinelabs_banks.py               — Seed Pinelabs Bank rows.
+
+public/js/:
+  pinelabs_buttons.js              — Injects "Pay on Machine" + "Send Payment
+                                     Link" buttons. Eligibility check pulls
+                                     Payable Doctypes from Settings.
+
+scheduler:
+  hooks.py scheduler_events["cron"] = {
+    "* * * * *": [
+      "pinelabs_fin.api.terminal.reconcile_pending_terminal_payments",
+      "pinelabs_fin.api.plural.reconcile_pending_plural_payments",
+    ],
+  }
+
+
+================================================================================
+7. INSTALLATION & FIRST-TIME CONFIGURATION
+================================================================================
+
+7.1 Install
+    cd ~/frappe-bench  (or your bench root)
+    bench get-app https://github.com/<owner>/pinelabs_fin
+    bench --site <your-site> install-app pinelabs_fin
+    bench --site <your-site> migrate
+
+    The migrate step runs install_pinelabs_modes.py (seeds the 4 Modes of
+    Payment + adds the Mode of Payment custom fields), seeds Pinelabs Banks,
+    and installs the doctypes.
+
+7.2 Settings → Basic Setup
+    1. Open "Pinelabs Settings".
+    2. Tick "Enabled".
+    3. Add at least one row in the Machines table:
+         - machine_name (any human-friendly label)
+         - client_id, security_token, merchant_id, store_id,
+           terminal_id, device_number (from your Pine Labs onboarding email)
+         - enabled = 1
+         - is_default = 1 (the only one or the chosen default)
+    4. Set Terminal Routing Mode:
+         - "Single Machine" — every transaction uses the is_default machine.
+         - "Mapping" — consult the Machine Mappings child table by context;
+           fall back to is_default if nothing matches.
+
+7.3 Settings → Plural API
+    1. Tick "Enable Payment Links".
+    2. Plural Client ID + Plural Client Secret (from your Plural dashboard).
+    3. Webhook Secret (HMAC) — must match the secret you'll configure in
+       the Plural dashboard. ≥ 16 characters.
+    4. Plural API Base URL — leave blank to auto-fill the sandbox URL
+       (pluraluat.v2.pinepg.in). For production, paste the production
+       host. Site_config "pine_plural_base_url" overrides this when the
+       field is blank, useful for pointing at a local simulator.
+    5. Payment Link Expiry (Minutes) — default 1440 (24 h).
+    6. Click "Test Plural Connection" (added by Settings JS) to verify
+       OAuth token retrieval works against your credentials.
+    7. Save. The save bumps the OAuth token cache automatically.
+
+7.4 Settings → Payable Documents
+    For each doctype you want PineLabs to be available on:
+    1. Add a row in Payable Doctypes.
+    2. doctype_name = "Sales Invoice" (or POS Invoice / Payment Request / etc.)
+    3. amount_field = "outstanding_amount" (or grand_total / amount).
+    4. If you do NOT want a Payment Entry created (some teams prefer to
+       update a custom status field instead):
+         - Untick "Create Payment Entry"
+         - Set status_field + paid_status_value (e.g. "status" + "Paid").
+    5. Configure Customer Contact Field Mapping (see section 9). For
+       Sales Invoice the easiest setup is:
+         - Mobile: Linked DocType → contact_person → Contact → mobile_no
+         - Email:  Linked DocType → contact_person → Contact → email_id
+       OR, if you prefer customer-level fallback:
+         - Mobile: Linked DocType → customer → Customer → mobile_no
+         - Email:  Linked DocType → customer → Customer → email_id
+
+7.5 Plural webhook configuration (in your Plural dashboard)
+    URL:    https://<your-erpnext-host>/api/method/pinelabs_fin.api.webhook.handle_webhook
+    Method: POST
+    Header: X-Verify  (the HMAC SHA-256 of the raw request body using your
+                       Webhook Secret, lower-case hex)
+    The handler refuses every webhook lacking a valid X-Verify (fail-closed).
+
+7.6 Confirm scheduler is enabled
+    bench --site <your-site> scheduler enable
+    bench --site <your-site> scheduler resume
+    The per-minute reconcile cron is the safety net for missed webhooks.
+
+
+================================================================================
+8. END USER GUIDE — DAY-TO-DAY USE
+================================================================================
+
+8.1 Take a payment on a Pine Labs terminal
+    1. Open a submitted Sales Invoice with outstanding > 0.
+    2. Click "Pay on Machine".
+    3. Pick a Mode of Payment from the dialog (only Card / UPI for terminal).
+    4. Dialog opens, shows "Initiated…", polls every 3 seconds.
+    5. Customer taps card / scans UPI on the device.
+    6. Dialog flips to "Success" within seconds; Payment Entry is created
+       and submitted automatically. Reload the invoice to see Outstanding=0.
+
+8.2 Send a payment link
+    1. Open a submitted Sales Invoice with outstanding > 0.
+    2. The customer must have email OR mobile available via the Customer
+       Contact Field Mapping (see section 9). If both are missing, the
+       button shows a clear error with a resolver trace explaining why.
+    3. Click "Send Payment Link". No dialog — the link is generated
+       immediately and a toast shows the URL.
+    4. Plural sends SMS/Email with the link.
+    5. Customer opens the link and pays via any method enabled in the
+       Plural dashboard (card / UPI / net banking / wallet).
+    6. Plural fires the webhook to your app.
+    7. Pinelabs Transaction status flips to SUCCESS; Payment Entry is
+       created. The Pinelabs Transaction form auto-reloads via realtime;
+       the Sales Invoice does not, but the per-minute cron + manual reload
+       picks up the change.
+
+8.3 Manual status refresh (admin troubleshooting)
+    On any Pinelabs Transaction record in PENDING:
+    Click "Refresh Status" → calls Plural's status API directly
+    → updates the record + creates Payment Entry if PROCESSED.
+    Same path the per-minute cron uses, just on demand.
+
+
+================================================================================
+9. CUSTOMER CONTACT RESOLUTION (Pay-by-Link only)
+================================================================================
+
+Plural requires customer email_id and mobile_number to send the SMS/Email
+with the link. The app resolves them in this priority order:
+
+  Priority 1 — Per-doctype config in Pinelabs Settings → Payable Doctypes
+              → Customer Contact Field Mapping (mobile_fetch_from /
+              email_fetch_from). Each can be:
+                "Direct Field" — read a named field on the source doc.
+                "Linked DocType" — follow a Link/Dynamic Link field on the
+                                   source doc to a target doctype, then
+                                   read a named field there.
+
+  Priority 2 — Well-known direct fields on the source doc:
+              mobile: contact_mobile / mobile_no / phone
+              email:  contact_email  / email_id  / email
+
+  Priority 3 — Linked Contact doctype (default contact for the customer).
+
+If after all 3 priorities both are empty, the button throws a clear error
+and prints a resolver trace (which mapping was tried, which raw values were
+read) so you can fix the mapping.
+
+The resolver lives in pinelabs_fin/api/customer_contact.py. The Settings
+form gives you cascading dropdowns: pick Linked DocType → Field Name lists
+only fields of compatible type ("Read Only" is included so Customer's
+auto-populated mobile_no/email_id show up).
+
+
+================================================================================
+10. TERMINAL ROUTING (Single vs Mapping)
+================================================================================
+
+10.1 Single Machine mode (default)
+    Every terminal payment uses the is_default machine row in
+    Pinelabs Settings.machines. Simplest case.
+
+10.2 Mapping mode
+    Each transaction gets routed to a machine by context. The router
+    (resolve_machine_for_context in pinelabs_settings.py) extracts contexts
+    from the source doc + session:
+      ("User",        frappe.session.user) — always (skipped for Guest)
+      ("Warehouse",   doc.set_warehouse or doc.warehouse)
+      ("Company",     doc.company)
+      ("POS Profile", doc.pos_profile)
+      ("Warehouse",   item.warehouse) — for each unique items[*].warehouse
+
+    It then walks Pinelabs Settings.machine_mappings (in-memory, not a DB
+    query — so unsaved edits are honoured), filtered by is_enabled and
+    matching (mapping_type, reference_name). Sorted alphabetically by
+    machine name. First row wins.
+
+    Fallback: if no mapping matches, returns get_default_machine_config().
+
+
+================================================================================
+11. SCHEDULER & RECONCILIATION
+================================================================================
+
+Two reconcile jobs run every minute via hooks.scheduler_events["cron"]:
+
+11.1 pinelabs_fin.api.terminal.reconcile_pending_terminal_payments
+    Catches users who closed the terminal-flow dialog before the foreground
+    poll saw a terminal state. Polls Pine Labs for each PENDING terminal
+    transaction and finalizes when state becomes terminal.
+
+11.2 pinelabs_fin.api.plural.reconcile_pending_plural_payments
+    Catches missed webhooks (no public URL, dropped delivery, secret
+    mismatch, …). For every PENDING Plural / Direct NB transaction, calls
+    refresh_payment_link_status, which routes through mark_success /
+    mark_failed (both no-op on terminal states — idempotent).
+
+If you ever need to disable reconcile (e.g. very high-volume, you trust
+webhooks fully), comment out the corresponding line in hooks.py and
+run `bench migrate` so Frappe drops the Scheduled Job Type row.
+
+
+================================================================================
+12. WEBHOOK HANDLER
+================================================================================
+
+Endpoint: POST /api/method/pinelabs_fin.api.webhook.handle_webhook
+Module:   pinelabs_fin/api/webhook.py
+Decorator: @frappe.whitelist(allow_guest=True)
+
+HTTP contract:
+  200 OK            Processed, or already-processed (idempotent retry).
+  400 Bad Request   Missing reference / unparseable JSON.
+  401 Unauthorized  Missing / invalid X-Verify, OR webhook secret unconfigured
+                    (FAIL-CLOSED — never silently accept unsigned webhooks).
+  404 Not Found     order_id does not match any Pinelabs Transaction.
+                    (Plural will not retry — intentional.)
+  405 Method Not    GET (or any non-POST). Sanity check.
+      Allowed
+  500 Server Error  System error (Plural will retry).
+
+Signature: HMAC-SHA256 over the RAW request body (no re-serialisation),
+using Pinelabs Settings → Webhook Secret as the key, lower-case hex,
+constant-time compared to the X-Verify header.
+
+Routing: looks up Pinelabs Transaction by order_id, then payment_id,
+then transaction.name. First match wins.
+
+Classification: PAID events / statuses → mark_success. FAILED events /
+statuses → mark_failed. Unknown event types are recorded in
+response_payload for debugging without changing status.
+
+
+================================================================================
+13. LOGGING & DEBUGGING
+================================================================================
+
+13.1 Pay-by-Link trace lines
+    Every Pay-by-Link API call logs a labelled block. Six labels exist:
+
+      [PineLabs PayByLink] Initiate:          (entry params, in plural.py)
+      [PineLabs PayByLink] Token Request:     (Plural OAuth call)
+      [PineLabs PayByLink] Token Response:    (status + body)
+      [PineLabs PayByLink] Token ERROR:       (exception path)
+      [PineLabs PayByLink] Link Request:      (POST /payment-links — full
+                                                headers + JSON body)
+      [PineLabs PayByLink] Link Response:     (status + JSON body)
+      [PineLabs PayByLink] Link ERROR:
+      [PineLabs PayByLink] Status Request:    (GET /payment-links/merchant/...)
+      [PineLabs PayByLink] Status Response:
+      [PineLabs PayByLink] Status ERROR:
+      [PineLabs PayByLink] Webhook Received:  (full inbound payload + X-Verify)
+      [PineLabs PayByLink] Webhook Decision:  (paid / failed / unknown / idempotent)
+      [PineLabs PayByLink] Initiate Result:   (final dict returned to JS)
+
+    Each block goes to two channels:
+      - print(...)                     → captured by the bench-start terminal
+                                          via honcho. Look for the `web.1`
+                                          prefix for web-request output;
+                                          `worker.1` for cron output.
+      - frappe.logger("pinelabs_paybylink", file_count=5).info/error(...)
+                                       → intended for ~/<bench>/logs/
+                                          pinelabs_paybylink.log. NOTE: in
+                                          some bench configurations this
+                                          file is created but not written
+                                          to (named-logger routing is
+                                          inconsistent). Trust the
+                                          bench-start terminal first.
+
+13.2 Where to look in the bench-start terminal
+    The terminal where you ran `bench start` is the single best window
+    into the app's behaviour. Every print() from web requests AND from
+    workers shows up there with a process prefix (`web.1`, `worker.1`).
+
+    To capture for later analysis:
+        bench start 2>&1 | tee /tmp/bench-start.log
+        grep "PineLabs PayByLink" /tmp/bench-start.log
+
+13.3 Standard Frappe logs (~/<bench>/logs/)
+    web.log              — gunicorn access log (no app-level lines).
+    worker.log           — cron output. Pay-by-Link prints from the
+                            reconcile cron land here too.
+    frappe.log           — app errors via frappe.log_error / frappe.get_traceback.
+    scheduler.log        — scheduler heartbeat.
+
+13.4 In-app debugging
+    Open any Pinelabs Transaction record. The form shows:
+      - request_payload (JSON sent to Plural / Pine Labs)
+      - response_payload (JSON received back, including the webhook body
+                          for completed Plural transactions)
+      - error_message (when status = FAILED)
+    The form also auto-refreshes via realtime when status changes.
+
+
+================================================================================
+14. LOCAL SIMULATOR (development only)
+================================================================================
+
+A standalone simulator at ~/pinelab/pinelab_simulator emulates Pine Labs
+Cloud API + Plural API on http://127.0.0.1:5000. Use it to develop without
+hitting real Pine Labs sandbox.
+
+14.1 Point the app at the simulator
+    Option A — site_config:
+        bench --site <your-site> set-config \
+              pine_plural_base_url "http://127.0.0.1:5000"
+    Option B — Pinelabs Settings:
+        Set Plural API Base URL = http://127.0.0.1:5000
+
+14.2 Point the simulator's webhook back at your bench
+    The simulator's DEFAULT webhook URL is
+        http://localhost:8000/api/method/pinelabs_fin.api.payment_link.handle_webhook
+    which is WRONG for this app:
+      - Port: usually wrong (your dev bench may be on 8006).
+      - Module name: payment_link.handle_webhook does NOT exist anymore
+        (the file was renamed to webhook.py in Phase 1).
+
+    Fix at runtime (not persisted across simulator restarts):
+        curl -X POST http://127.0.0.1:5000/api/config \
+             -H "Content-Type: application/json" \
+             -d '{"webhook_callback_url": "http://127.0.0.1:8006/api/method/pinelabs_fin.api.webhook.handle_webhook"}'
+
+    Or persist by exporting the env var before starting the simulator:
+        export WEBHOOK_CALLBACK_URL=http://127.0.0.1:8006/api/method/pinelabs_fin.api.webhook.handle_webhook
+
+14.3 Simulator credentials
+    Use SIM_CLIENT_ID_DEMO / SIM_CLIENT_SECRET_DEMO as the Plural Client
+    ID / Secret in Pinelabs Settings. The simulator accepts any string;
+    these match the docs.
+
+14.4 Resolve a payment link manually
+    The simulator's hosted "pay" page (http://127.0.0.1:5000/sim/pay-link/
+    <link_id>) lets you click Pay or Fail. Or call:
+        POST /api/pay/v1/payment-links/<link_id>/sim-resolve
+        {"outcome": "SUCCESS"}    or    {"outcome": "FAILED"}
+    Either path triggers the webhook back to your app.
+
+
+================================================================================
+15. KNOWN ISSUES & WARNINGS
+================================================================================
+
+15.1 Plural URL paths may not match production Plural
+    api/plural_client.py uses:
+      POST /api/pay/v1/payment-links
+      GET  /api/pay/v1/payment-links/merchant/{merchant_ref}
+    The published Pine Labs docs show:
+      POST /api/pay/v1/paymentlink            (singular, no hyphen)
+      GET  /api/pay/v1/paymentlink/{payment_link_id}
+    The current paths work against the local simulator (we wrote the
+    simulator to match), but will likely 404 against the real Plural
+    sandbox/production. Verify against the real Plural environment in
+    Postman before going live, and update plural_client.py if needed.
+    A NOTE comment in get_payment_link_status flags the same.
+
+15.2 Failing tests in test_phase1.py
+    6 errors/failures as of last run:
+      TestTransactionStateMachine.test_initial_status_is_initiated
+      TestTransactionStateMachine.test_illegal_transition_initiated_to_initiated_silent
+      TestTransactionStateMachine.test_manual_status_to_success_is_blocked
+      TestTransactionStateMachine.test_pending_to_initiated_is_rejected
+      TestTerminalInitiate.test_pending_on_response_code_zero
+      TestPaymentEntryGuards.test_existing_pe_with_same_reference_no_is_reused
+    Root cause for most: setUp fixtures rely on a Sales Invoice that does
+    not survive frappe.db.rollback() between methods. The fix pattern is
+    already established in TestRouting — move setup from setUpClass to
+    per-test setUp. Roughly 1 hour of work.
+
+15.3 App metadata is placeholder
+    hooks.py:
+      app_publisher = "pine"
+      app_description = "pine"
+      app_email = "pinelab12@gmail.com"
+    pyproject.toml:
+      description = "pine"
+      authors[].name = "pine"
+    Replace before publishing to the Frappe Marketplace.
+
+15.4 README is boilerplate
+    41-line README, single-line "pine" description, no screenshots. The
+    Marketplace listing reads heavily from this file. See
+    MARKETPLACE_PLAN.md for the recommended README structure.
+
+15.5 required_apps not declared
+    hooks.py line 11 has `# required_apps = []` (commented out).
+    Should be: required_apps = ["erpnext"]
+    ERPNext is a real dependency — transaction.py imports
+    erpnext.accounts.doctype.payment_entry.payment_entry.get_payment_entry.
+
+15.6 frappe.logger("pinelabs_paybylink") may be silent in some benches
+    The Pay-by-Link logging code calls
+    `frappe.logger("pinelabs_paybylink", file_count=5).info(...)` which is
+    intended to write to ~/<bench>/logs/pinelabs_paybylink.log. In
+    practice this file is sometimes created (0 bytes) but never written
+    to — Frappe's named-logger handler routing depends on the bench
+    config and the calling context. Always rely on the bench-start
+    terminal's `print()` output as the primary debugging channel.
+
+15.7 Webhook handler is fail-closed on missing secret
+    If you forget to set Webhook Secret in Pinelabs Settings, EVERY
+    webhook from Plural will return 401 ("Webhook secret not configured;
+    refusing webhook."). This is intentional — never silently accept
+    unsigned webhooks on a guest endpoint — but it can be confusing the
+    first time you see it. Set the secret BEFORE any payments go live.
+
+15.8 Simulator's webhook URL is wrong by default
+    See section 14.2. Symptom: payment completes in the simulator UI but
+    your app never finalizes the transaction; simulator shows
+    webhook_status = RETRY_EXHAUSTED, webhook_last_response_code = 404.
+
+15.9 Bench start in dev mode does not auto-reload Python code
+    `bench start` runs `frappe serve --port <p>` without --reload.
+    Editing api/*.py files requires either:
+      - pkill -f "frappe serve --port <port>"  (honcho respawns it)
+      - Ctrl+C in the bench-start terminal, then `bench start` again
+
+15.10 SELECT FOR UPDATE locks require InnoDB
+    All Pinelabs Transaction status transitions take a row lock via
+    `frappe.db.get_value(..., for_update=True)`. This requires InnoDB,
+    which is the default for Frappe / MariaDB. Don't switch the table
+    to MyISAM.
+
+
+================================================================================
+16. TROUBLESHOOTING — COMMON SYMPTOMS
+================================================================================
+
+Symptom: "Customer email or mobile is required to send a payment link."
+   Open Pinelabs Settings → Payable Documents, expand the row for the
+   doctype (e.g. Sales Invoice). Check the Customer Contact Field
+   Mapping. The error includes a resolver trace showing exactly which
+   field was tried and what raw value came back. Common fix: switch
+   from "Direct Field" (looking at a NULL field on the doc) to
+   "Linked DocType" pointing at Customer or Contact.
+
+Symptom: "Payment link failed / You are not authenticated"
+   Plural OAuth failed. Either:
+     - Wrong client_id / client_secret in Pinelabs Settings.
+     - Pointing at the wrong base URL (sandbox creds against prod URL or
+       vice versa). Check site_config "pine_plural_base_url" and
+       Settings → Plural API Base URL.
+
+Symptom: Pinelabs Transaction stuck at PENDING after customer paid
+   Either the webhook didn't arrive, or it arrived but was rejected.
+   Check, in this order:
+     1. Pinelabs Settings → Webhook Secret matches Plural dashboard.
+        (The handler is fail-closed — see 15.7.)
+     2. Plural dashboard's webhook URL points at the right host (https,
+        full path including /api/method/pinelabs_fin.api.webhook.handle_webhook).
+     3. The bench-start terminal for `[PineLabs PayByLink] Webhook Received:`
+        — if absent, the webhook never reached your app.
+     4. The per-minute reconcile cron should pick it up within 60s
+        anyway. If it doesn't, check `bench --site <s> show-pending-jobs`
+        and confirm scheduler is enabled & running.
+
+Symptom: Terminal status stuck at PENDING after customer tapped card
+   The dialog's foreground poll usually catches this within 3s. If it
+   doesn't:
+     - Reload the form. The 3-layer defense (poll + realtime + 1-min
+       cron) will pick it up.
+     - Check Pinelabs Transaction.response_payload to see what the
+       Pine Labs Cloud API last reported.
+
+Symptom: 405 / 401 in bench-start logs at random times
+   These are likely curl probes / health checks / your own testing.
+   405 = GET to a POST-only endpoint. 401 = POST to webhook without
+   X-Verify. Both prove the endpoint is reachable.
+
+
+================================================================================
+17. MARKETPLACE READINESS
+================================================================================
+
+Status: NOT READY. Code is in good shape, but the listing-facing surface
+needs work. See MARKETPLACE_PLAN.md (at the repo root) for the full
+checklist. Summary of blockers:
+
+  1. Failing tests (15.2) — fix the 6 cases.
+  2. Plural URL paths (15.1) — verify against real Plural and update.
+  3. App metadata (15.3) — replace "pine" with real publisher / description.
+  4. README (15.4) — write a real one with screenshots.
+  5. required_apps (15.5) — declare ERPNext as a dependency.
+  6. Branch + tag — merge phase-1-rewrite to main, tag v0.1.0.
+
+Estimated total effort: ~half a day plus screenshot/copy time.
+
+
+================================================================================
+18. ENVIRONMENT QUICK-REFERENCE
+================================================================================
+
+Bench root for this app:           ~/bench-bulb/
+App dir:                           ~/bench-bulb/apps/pinelabs_fin/
+Site (dev):                        payment.local
+Dev web port:                      8006
+Simulator:                         http://127.0.0.1:5000  (PID varies)
+Real Plural sandbox:               https://pluraluat.v2.pinepg.in
+Real Plural production:            https://api.pluralpay.in
+
+Important commands:
+  cd ~/bench-bulb && bench start                  — start dev server
+  bench --site payment.local migrate              — apply schema + patches
+  bench --site payment.local console              — Python REPL with frappe
+  bench --site payment.local tail-logs            — tail site logs
+  bench --site payment.local run-tests --app pinelabs_fin   — full test run
+  pkill -f "frappe serve --port 8006"             — reload web code (honcho
+                                                     respawns the process)
+  curl -s http://127.0.0.1:5000/api/integration-config
+                                                  — read simulator config
+
+
+================================================================================
+END OF GUIDE
+================================================================================

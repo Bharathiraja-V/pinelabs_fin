@@ -153,7 +153,7 @@ scheduler_events = {
 		# Reconcile any PENDING transactions with Pine Labs every minute.
 		# - Terminal: catches users who closed the dialog before the foreground
 		#   poll saw a terminal state.
-		# - Plural / Direct NB: catches missed webhooks (no public URL, dropped
+		# - Plural: catches missed webhooks (no public URL, dropped
 		#   delivery, secret mismatch, …) so doc finalizes without manual click.
 		"* * * * *": [
 			"pinelabs_fin.api.terminal.reconcile_pending_terminal_payments",

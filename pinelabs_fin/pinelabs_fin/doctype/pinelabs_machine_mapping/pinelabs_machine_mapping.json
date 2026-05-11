@@ -10,7 +10,6 @@
   "reference_doctype",
   "reference_name",
   "machine",
-  "priority",
   "is_enabled",
   "description"
  ],
@@ -18,8 +17,7 @@
   {"columns": 2, "description": "Routing context type. The reference_doctype is auto-set from this on save.", "fieldname": "mapping_type", "fieldtype": "Select", "in_list_view": 1, "label": "Mapping Type", "options": "User\nWarehouse\nCompany\nPOS Profile", "reqd": 1},
   {"description": "Auto-set from mapping_type. Do not edit directly.", "fieldname": "reference_doctype", "fieldtype": "Link", "label": "Reference DocType", "options": "DocType", "read_only": 1, "hidden": 1},
   {"columns": 3, "description": "The specific User / Warehouse / Company / POS Profile this mapping applies to.", "fieldname": "reference_name", "fieldtype": "Dynamic Link", "in_list_view": 1, "label": "Reference", "options": "reference_doctype", "reqd": 1},
-  {"columns": 3, "description": "Pine Labs machine machine_name from Pinelabs Settings → Machines.", "fieldname": "machine", "fieldtype": "Data", "in_list_view": 1, "label": "Machine", "reqd": 1},
-  {"columns": 1, "default": "100", "description": "Lower = wins. Tie-break is alphabetical by machine name.", "fieldname": "priority", "fieldtype": "Int", "in_list_view": 1, "label": "Priority"},
+  {"columns": 4, "description": "Pine Labs machine machine_name from Pinelabs Settings → Machines.", "fieldname": "machine", "fieldtype": "Data", "in_list_view": 1, "label": "Machine", "reqd": 1},
   {"columns": 1, "default": "1", "fieldname": "is_enabled", "fieldtype": "Check", "in_list_view": 1, "label": "Enabled"},
   {"fieldname": "description", "fieldtype": "Small Text", "label": "Description"}
  ],

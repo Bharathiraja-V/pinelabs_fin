@@ -1,13 +1,30 @@
 # Copyright (c) 2026, Pinelabs Fin contributors
 # For license information, please see license.txt
 
-from __future__ import unicode_literals
+"""Pinelabs Settings — singleton holding all integration config.
+
+Sections (in form order):
+  - Basic Setup        — master enable, terminals (``machines`` table) +
+                          routing mode, mapping rules.
+  - Plural API         — Pay-by-Link credentials, base URL, expiry.
+  - Payable Documents  — per-doctype eligibility + customer-contact mapping.
+  - Technical          — endpoint overrides, SSL, debug, auto-cancel.
+
+Public helpers (used outside the controller):
+  - ``get_default_machine_config()`` — single-mode machine pick.
+  - ``resolve_machine_for_context(...)`` — mapping-mode machine pick with
+    fallback to default. Used by ``api/terminal.py``.
+
+The controller's ``validate`` chain enforces: at-most-one default machine,
+plural credential length / expiry, payable-doctype amount/status fields,
+and the Customer Contact Field Mapping completeness. ``on_update`` busts
+the cached Plural OAuth token whenever an identity-bearing field changes.
+"""
 
 import frappe
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint
-
 
 _MIN_WEBHOOK_SECRET_LEN = 16
 # Watched fields — when any of these change, the Plural OAuth token cache must
@@ -82,7 +99,7 @@ class PinelabsSettings(Document):
 		"""
 		if not cint(self.enable_payment_links):
 			return
-		from pinelabs_fin.api.pinelabs_client import PineLabsClient
+		from pinelabs_fin.api.plural_client import PLURAL_SANDBOX_URL
 
 		typed = (self.plural_base_url or "").strip()
 		if typed:
@@ -93,7 +110,7 @@ class PinelabsSettings(Document):
 		if site_override:
 			self.plural_base_url = site_override.rstrip("/")
 			return
-		self.plural_base_url = PineLabsClient.PLURAL_SANDBOX_URL
+		self.plural_base_url = PLURAL_SANDBOX_URL
 
 	def _maybe_bust_plural_token_cache(self):
 		"""Clear the cached OAuth token if any identity-bearing field changed.
@@ -175,7 +192,7 @@ class PinelabsSettings(Document):
 					),
 				)
 
-def get_default_machine_config():
+def get_default_machine_config() -> Document | None:
 	"""Return the default Pinelabs Machine Config row, or None if not configured."""
 	settings = frappe.get_single("Pinelabs Settings")
 	if not cint(settings.enabled):
@@ -190,7 +207,11 @@ def get_default_machine_config():
 	return None
 
 
-def resolve_machine_for_context(reference_doctype, reference_name, source_doc=None):
+def resolve_machine_for_context(
+	reference_doctype: str | None,
+	reference_name: str | None,
+	source_doc: Document | None = None,
+) -> Document | None:
 	"""Pick the Pinelabs Machine Config row for a transaction.
 
 	Resolution depends on Pinelabs Settings.terminal_routing_mode:
@@ -198,9 +219,9 @@ def resolve_machine_for_context(reference_doctype, reference_name, source_doc=No
 	- ``Single Machine`` (default) → returns ``get_default_machine_config()``.
 	- ``Mapping`` → walks ``settings.machine_mappings`` (an inline child table)
 	  for rows whose ``(mapping_type, reference_name)`` matches a context
-	  extracted from the source document and current session, ordered by
-	  ``priority asc, machine asc``; falls back to ``get_default_machine_config()``
-	  on no match.
+	  extracted from the source document and current session, ordered
+	  alphabetically by machine name; falls back to
+	  ``get_default_machine_config()`` on no match.
 
 	Returns ``None`` if neither path resolves a machine — caller should error
 	with the standard "no machine configured" message.
@@ -231,9 +252,8 @@ def resolve_machine_for_context(reference_doctype, reference_name, source_doc=No
 			if cint(row.is_enabled)
 			and (row.mapping_type, row.reference_name) in context_set
 		]
-		# Stable sort on (priority asc, machine asc) — matches the previous
-		# `order_by="priority asc, machine asc"` SQL ordering.
-		candidates.sort(key=lambda r: (cint(r.priority), (r.machine or "")))
+		# Deterministic alphabetical tie-break on machine name.
+		candidates.sort(key=lambda r: (r.machine or ""))
 		if candidates:
 			machine_name = candidates[0].machine
 			# Resolve the child-table row on Settings.machines — terminal.py

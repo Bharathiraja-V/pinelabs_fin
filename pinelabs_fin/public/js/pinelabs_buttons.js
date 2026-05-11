@@ -6,8 +6,8 @@
 // in Pinelabs Settings > Payable Documents:
 //
 //   1. Pay on Machine    -> Card / UPI selector -> polls until terminal status
-//   2. Send Payment Link -> {All Methods, Quick NB, UPI Only, Card Only}
-//                           quick_nb opens a bank picker.
+//   2. Send Payment Link -> generates a Plural hosted link covering all
+//                           enabled payment methods (no per-method dialog).
 //
 // All flow gating happens server-side. The buttons render whenever the
 // doctype is in the payable list — the backend rejects with a clear
@@ -127,7 +127,7 @@
 		// add_custom_button is idempotent (shows the existing button when
 		// called twice with the same label), so no extra dedup guard needed.
 		frm.add_custom_button(__("Pay on Machine"), () => open_terminal_dialog(frm));
-		frm.add_custom_button(__("Send Payment Link"), () => open_payment_link_dialog(frm));
+		frm.add_custom_button(__("Send Payment Link"), () => start_payment_link(frm, "all_methods"));
 	}
 
 	function outstanding_amount(frm) {
@@ -351,55 +351,13 @@
 	// Send Payment Link flow
 	// ─────────────────────────────────────────────────────────────────
 
-	function open_payment_link_dialog(frm) {
-		const dialog = new frappe.ui.Dialog({
-			title: __("Send Payment Link"),
-			fields: [
-				{
-					fieldname: "flow",
-					fieldtype: "Select",
-					label: __("Flow"),
-					reqd: 1,
-					default: "all_methods",
-					options: [
-						"all_methods",
-						"card_only",
-						"upi_only",
-						"nb_only",
-						"quick_nb",
-					].join("\n"),
-					description: __(
-						"all_methods sends a Plural hosted page with all payment options. quick_nb redirects the customer straight to a bank you choose.",
-					),
-				},
-				{
-					fieldname: "bank_code",
-					fieldtype: "Data",
-					label: __("Bank Code (NB####)"),
-					depends_on: "eval:doc.flow=='quick_nb'",
-					mandatory_depends_on: "eval:doc.flow=='quick_nb'",
-					description: __(
-						"Pine Labs net banking pay code. Common values: NB1004 (Axis), NB1007 (HDFC), NB1016 (ICICI), NB1531 (SBI), NB1565 (Kotak). Full list at developer.pinelabsonline.com/docs/supported-bank.",
-					),
-				},
-			],
-			primary_action_label: __("Continue"),
-			primary_action(values) {
-				dialog.hide();
-				start_payment_link(frm, values.flow, values.bank_code);
-			},
-		});
-		dialog.show();
-	}
-
-	function start_payment_link(frm, flow, bank_code) {
+	function start_payment_link(frm, flow) {
 		frappe.call({
 			method: "pinelabs_fin.api.plural.initiate_payment_link",
 			args: {
 				reference_doctype: frm.doctype,
 				reference_name: frm.docname,
 				flow,
-				bank_code: bank_code || null,
 			},
 			freeze: true,
 			freeze_message: __("Generating payment link..."),
@@ -410,13 +368,7 @@
 					if (msg.transaction_name) frm.reload_doc();
 					return;
 				}
-				if (flow === "quick_nb" && msg.redirect_url) {
-					frappe.show_alert({
-						message: __("Redirecting customer to bank..."),
-						indicator: "blue",
-					});
-					window.open(msg.redirect_url, "_blank");
-				} else if (msg.payment_link_url) {
+				if (msg.payment_link_url) {
 					show_link_result(msg.payment_link_url);
 				}
 				frm.reload_doc();

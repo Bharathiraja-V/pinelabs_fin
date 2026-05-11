@@ -133,7 +133,7 @@
    "read_only": 1
   },
   {
-   "description": "Routing rules used when Terminal Routing Mode is Mapping. Each row says: when context X matches (User / Warehouse / Company / POS Profile), route to machine Y at priority Z. Lower priority wins; alphabetical tie-break on machine name.",
+   "description": "Routing rules used when Terminal Routing Mode is Mapping. Each row says: when context X matches (User / Warehouse / Company / POS Profile), route to machine Y. When more than one row matches, the alphabetically-first machine name wins.",
    "fieldname": "machine_mappings",
    "fieldtype": "Table",
    "label": "Machine Mappings",

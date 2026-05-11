@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2026, Pinelabs Fin contributors
 # For license information, please see license.txt
 
@@ -17,8 +16,6 @@ HTTP contract:
   500  - System error (Plural will retry).
 """
 
-from __future__ import unicode_literals
-
 import hashlib
 import hmac
 import json
@@ -26,7 +23,6 @@ import json
 import frappe
 from frappe import _
 from frappe.utils import now_datetime
-
 
 _PAID_STATUSES = {"PROCESSED", "SUCCESS", "PAID", "CAPTURED"}
 _FAILED_STATUSES = {"FAILED", "FAILURE", "CANCELLED", "EXPIRED", "DECLINED"}
@@ -73,6 +69,7 @@ def handle_webhook():
 		txn = frappe.get_doc("Pinelabs Transaction", txn_name)
 		if txn.status == "SUCCESS":
 			# Idempotent — already finalized on a prior delivery.
+			_log_decision("already SUCCESS (idempotent)", txn_name)
 			_touch_last_sync()
 			return _respond(200, "Already processed", success=True)
 
@@ -80,6 +77,7 @@ def handle_webhook():
 		if decision == "paid":
 			payment_id = payload.get("payment_id") or payload.get("transaction_id") or order_id
 			payment_method = _extract_method(payload)
+			_log_decision("paid → mark_success", txn_name, payment_id=payment_id, payment_method=payment_method)
 			txn_service.mark_success(
 				txn,
 				payment_id=payment_id,
@@ -91,11 +89,13 @@ def handle_webhook():
 
 		if decision == "failed":
 			reason = payload.get("error_message") or payload.get("message") or event_type
+			_log_decision("failed → mark_failed", txn_name, reason=reason)
 			txn_service.mark_failed(txn, error_message=reason, response_payload=data)
 			_touch_last_sync()
 			return _respond(200, "Recorded failure", success=True)
 
 		# Unknown event — store payload for debugging, leave status alone.
+		_log_decision(f"unknown event_type={event_type} status={payload.get('status')}", txn_name)
 		txn.response_payload = json.dumps(data, indent=2, default=str)
 		txn.flags.pinelabs_internal_transition = True
 		txn.save(ignore_permissions=True)
@@ -205,7 +205,28 @@ def _respond(http_status, message, success=False):
 
 def _log_inbound(data):
 	try:
-		frappe.logger().info(f"Plural webhook received: {json.dumps(data, default=str)[:1500]}")
+		dump = (
+			f"[PineLabs PayByLink] Webhook Received:\n"
+			f"  Headers: X-Verify={frappe.request.headers.get('X-Verify')}\n"
+			f"  Body: {json.dumps(data, indent=2, default=str)}"
+		)
+		print(dump)
+		frappe.logger("pinelabs_paybylink", file_count=5).info(dump)
+	except Exception:
+		pass
+
+
+def _log_decision(decision, txn_name, payment_id=None, payment_method=None, reason=None):
+	try:
+		line = f"[PineLabs PayByLink] Webhook Decision: txn={txn_name} → {decision}"
+		if payment_id:
+			line += f" payment_id={payment_id}"
+		if payment_method:
+			line += f" payment_method={payment_method}"
+		if reason:
+			line += f" reason={reason}"
+		print(line)
+		frappe.logger("pinelabs_paybylink", file_count=5).info(line)
 	except Exception:
 		pass
 

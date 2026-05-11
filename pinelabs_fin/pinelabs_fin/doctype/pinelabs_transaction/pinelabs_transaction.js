@@ -87,7 +87,7 @@ function render_buttons(frm) {
 	const status = frm.doc.status;
 	const flow = frm.doc.flow_type;
 
-	if ((flow === "Plural" || flow === "Direct NB") && (status === "PENDING" || status === "INITIATED")) {
+	if (flow === "Plural" && (status === "PENDING" || status === "INITIATED")) {
 		frm.add_custom_button(
 			__("Refresh Status"),
 			() => refresh_plural_status(frm),

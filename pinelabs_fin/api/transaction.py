@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2026, Pinelabs Fin contributors
 # For license information, please see license.txt
 
@@ -30,16 +29,13 @@ Payment Entry creation rules (from PHASE_1_PLAN §8):
   7. Wrapped in one DB transaction; rollback on any error.
 """
 
-from __future__ import unicode_literals
-
 import json
 
 import frappe
 from frappe import _
-from frappe.utils import cint, flt, get_datetime, now_datetime
+from frappe.utils import cint, flt, now_datetime
 
-
-VALID_FLOW_TYPES = ("Terminal", "Plural", "Direct NB")
+VALID_FLOW_TYPES = ("Terminal", "Plural")
 ACTIVE_STATUSES = ("INITIATED", "PENDING")
 
 
@@ -56,7 +52,6 @@ def create_transaction(
 	*,
 	payment_method=None,
 	machine=None,
-	bank_code=None,
 	order_id=None,
 	request_payload=None,
 ):
@@ -81,7 +76,6 @@ def create_transaction(
 	doc.payment_method = payment_method
 	doc.amount = flt(amount)
 	doc.machine = machine
-	doc.bank_code = bank_code
 	doc.order_id = order_id
 	doc.created_at = now_datetime()
 	doc.status = "INITIATED"
@@ -290,7 +284,7 @@ def _resolve_mode_of_payment(transaction):
 	- pinelabs_enabled = 1
 	- pinelabs_flow_type matches (or "Both")
 	- For Terminal: pinelabs_terminal_code matches the integer code we sent
-	- For Plural / Direct NB: pinelabs_plural_method matches CARD/UPI/NB/WALLET
+	- For Plural: pinelabs_plural_method matches CARD/UPI/NB/WALLET
 	"""
 	flow = transaction.flow_type
 	method = (transaction.payment_method or "").upper()
@@ -303,7 +297,7 @@ def _resolve_mode_of_payment(transaction):
 		if method:
 			filters["pinelabs_plural_method"] = method
 	else:
-		# Plural / Direct NB — payment_method comes back from the webhook.
+		# Plural — payment_method comes back from the webhook.
 		filters["pinelabs_flow_type"] = ["in", ["Plural", "Both"]]
 		if method:
 			filters["pinelabs_plural_method"] = method
@@ -414,7 +408,6 @@ def _get_payable_config(reference_doctype):
 def _apply_mapped_finalization(transaction, config):
 	"""Update the source document's status field instead of creating a PE.
 
-	Behavior mirrors the prior host_adapter mapped-finalization path:
 	- Set status_field = paid_status_value
 	- If link_payment_entry_field is set, write the Pinelabs Transaction name there
 	- If paid_status_value is "Submitted" and the doctype is submittable + draft,

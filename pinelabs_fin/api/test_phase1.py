@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2026, Pinelabs Fin contributors
 # For license information, please see license.txt
 
@@ -7,8 +6,6 @@
 Run with:
   bench --site <site> run-tests --app pinelabs_fin --module pinelabs_fin.api.test_phase1
 """
-
-from __future__ import unicode_literals
 
 import hashlib
 import hmac
@@ -102,8 +99,9 @@ class TestPaymentEntryGuards(unittest.TestCase):
 
 	def test_existing_pe_with_same_reference_no_is_reused(self):
 		"""Rule 2: pre-existing PE with same reference_no → no duplicate."""
-		from pinelabs_fin.api import transaction as txn_service
 		from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+
+		from pinelabs_fin.api import transaction as txn_service
 
 		# Pre-create a PE manually.
 		pe = get_payment_entry("Sales Invoice", self._invoice.name)
@@ -261,7 +259,7 @@ class TestRouting(unittest.TestCase):
 		"POS Profile": "POS Profile",
 	}
 
-	def _add_mapping(self, *, mapping_type, reference_name, machine, priority=100):
+	def _add_mapping(self, *, mapping_type, reference_name, machine):
 		# `reference_doctype` is set explicitly: Frappe runs `_validate_links`
 		# on child rows before any controller hook, so a missing value here
 		# would raise "Reference DocType must be set first".
@@ -271,7 +269,6 @@ class TestRouting(unittest.TestCase):
 			"reference_doctype": self._MAPPING_TYPE_TO_DOCTYPE[mapping_type],
 			"reference_name": reference_name,
 			"machine": machine,
-			"priority": priority,
 			"is_enabled": 1,
 		})
 		settings.flags.ignore_mandatory = True
@@ -289,7 +286,6 @@ class TestRouting(unittest.TestCase):
 			mapping_type="User",
 			reference_name=frappe.session.user,
 			machine="Routing Machine A",
-			priority=10,
 		)
 		machine = resolve_machine_for_context("Sales Invoice", self._invoice.name)
 		self.assertIsNotNone(machine)
@@ -305,7 +301,6 @@ class TestRouting(unittest.TestCase):
 			mapping_type="User",
 			reference_name=frappe.session.user,
 			machine="Routing Machine A",
-			priority=50,
 		)
 		machine = resolve_machine_for_context("Sales Invoice", self._invoice.name)
 		self.assertIsNotNone(machine)
@@ -323,34 +318,31 @@ class TestRouting(unittest.TestCase):
 			mapping_type="User",
 			reference_name="Guest",
 			machine="Routing Machine A",
-			priority=10,
 		)
 		machine = resolve_machine_for_context("Sales Invoice", self._invoice.name)
 		self.assertIsNotNone(machine)
 		self.assertEqual(machine.machine_name, "Routing Default")
 
-	def test_priority_tie_breaks_alphabetically(self):
+	def test_multiple_matches_pick_alphabetically_first_machine(self):
 		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 			resolve_machine_for_context,
 		)
 
 		self._set_mode("Mapping")
-		# Two mappings with the same priority that both match the current user.
+		# Two mappings that both match the current user.
 		self._add_mapping(
 			mapping_type="User",
 			reference_name=frappe.session.user,
 			machine="Routing Machine B",
-			priority=50,
 		)
 		self._add_mapping(
 			mapping_type="User",
 			reference_name=frappe.session.user,
 			machine="Routing Machine A",
-			priority=50,
 		)
 		machine = resolve_machine_for_context("Sales Invoice", self._invoice.name)
 		self.assertIsNotNone(machine)
-		# Tie-break is `order_by="priority asc, machine asc"` → A wins.
+		# Sort is alphabetical by machine name → A wins.
 		self.assertEqual(machine.machine_name, "Routing Machine A")
 
 

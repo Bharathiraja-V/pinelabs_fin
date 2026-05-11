@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2026, Pinelabs Fin contributors
 # For license information, please see license.txt
 
@@ -18,15 +17,18 @@ State flow:
     cancel → mark_cancelled
 """
 
-from __future__ import unicode_literals
-
 import frappe
 from frappe import _
 from frappe.utils import cint, flt
 
 
 @frappe.whitelist()
-def initiate_terminal_payment(reference_doctype, reference_name, mode_of_payment, amount=None):
+def initiate_terminal_payment(
+	reference_doctype: str,
+	reference_name: str,
+	mode_of_payment: str,
+	amount: float | None = None,
+) -> dict:
 	"""Start a terminal payment.
 
 	Returns {success, transaction_name, response_code, message}.
@@ -121,7 +123,7 @@ def initiate_terminal_payment(reference_doctype, reference_name, mode_of_payment
 
 
 @frappe.whitelist()
-def check_terminal_status(transaction_name):
+def check_terminal_status(transaction_name: str) -> dict:
 	"""Poll Pine Labs for the latest terminal status of a transaction.
 
 	Frontend calls this every ~3s while its modal is open.
@@ -178,7 +180,7 @@ def check_terminal_status(transaction_name):
 
 
 @frappe.whitelist()
-def cancel_terminal_payment(transaction_name, reason=None):
+def cancel_terminal_payment(transaction_name: str, reason: str | None = None) -> dict:
 	"""User-driven cancel of an in-flight terminal transaction."""
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
@@ -200,7 +202,7 @@ def cancel_terminal_payment(transaction_name, reason=None):
 	return {"success": True, "status": "CANCELLED", "message": server_message or "Cancelled"}
 
 
-def reconcile_pending_terminal_payments():
+def reconcile_pending_terminal_payments() -> None:
 	"""Cron task — reconcile every PENDING Terminal transaction with Pine Labs.
 
 	Why this exists: the browser dialog drives `check_terminal_status` while

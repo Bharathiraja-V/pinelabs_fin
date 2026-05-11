@@ -1,13 +1,23 @@
-# -*- coding: utf-8 -*-
 # Copyright (c) 2026, Pinelabs Fin contributors
 # For license information, please see license.txt
 
-from __future__ import unicode_literals
+"""Pinelabs Transaction — single source of truth for one payment attempt.
+
+Polymorphic via ``reference_doctype`` / ``reference_name`` Dynamic Link.
+Carries the flow type (Terminal / Plural), payment method
+(CARD / UPI / NB / WALLET), the linked Pine Labs identifiers, and the
+created Payment Entry on success.
+
+This controller only enforces the **state machine** (allowed transitions
+between INITIATED / PENDING / SUCCESS / FAILED / CANCELLED) — the actual
+transitions and Payment Entry creation are driven by ``api/transaction.py``,
+which sets ``flags.pinelabs_internal_transition = True`` on legitimate
+saves. User-driven status edits without that flag are blocked here.
+"""
 
 import frappe
 from frappe import _
 from frappe.model.document import Document
-
 
 # Allowed forward transitions. Anything not listed is rejected.
 _ALLOWED_TRANSITIONS = {
