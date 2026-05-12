@@ -38,6 +38,70 @@ from frappe.utils import cint, flt, now_datetime
 VALID_FLOW_TYPES = ("Terminal", "Plural")
 ACTIVE_STATUSES = ("INITIATED", "PENDING")
 
+# ERPNext's get_payment_entry helper natively supports these three. For any
+# other doctype, mark_success will throw at PE creation time — see
+# _create_payment_entry_idempotent. The validator at the bottom of this
+# module checks this BEFORE the customer is asked to pay.
+PE_NATIVE_DOCTYPES = ("Sales Invoice", "POS Invoice", "Payment Request")
+
+
+def validate_finalization_ready(reference_doctype):
+	"""Refuse to start a payment when the app can't finish it cleanly.
+
+	Called from the click-time initiate APIs in terminal.py and plural.py
+	BEFORE the upstream gateway is contacted. Closes the failure-after-the-
+	customer-paid gap.
+
+	Two valid configurations:
+	1. reference_doctype is one of PE_NATIVE_DOCTYPES → ERPNext's
+	   get_payment_entry will build the PE on success.
+	2. A Payable Documents row exists with finalize_via_payment_entry = 0
+	   AND status_field AND paid_status_value populated → mark_success will
+	   take the mapped-finalization branch instead of trying to build a PE.
+
+	Anything else throws here so the cashier sees the setup gap before the
+	terminal beeps or the link is generated.
+	"""
+	if reference_doctype in PE_NATIVE_DOCTYPES:
+		return
+
+	config = _get_payable_config(reference_doctype)
+	if not config:
+		frappe.throw(
+			_(
+				"Cannot accept Pine Labs payments on {0} yet.\n\n"
+				"Open Pinelabs Settings → Payable Documents, add a row for {0}, "
+				"untick 'Create Payment Entry', and set 'Status Field' + 'Paid "
+				"Status Value' so the app knows how to record the payment after "
+				"the customer pays."
+			).format(reference_doctype),
+		)
+
+	if cint(config.get("finalize_via_payment_entry", 1)):
+		frappe.throw(
+			_(
+				"Cannot accept Pine Labs payments on {0}: it is not Sales Invoice "
+				"/ POS Invoice / Payment Request, but its Payable Documents row "
+				"has 'Create Payment Entry' ticked. ERPNext's Payment Entry "
+				"builder does not support {0}, so finalization would fail after "
+				"the customer paid.\n\n"
+				"Fix: open the row in Pinelabs Settings → Payable Documents, "
+				"untick 'Create Payment Entry', and set 'Status Field' + 'Paid "
+				"Status Value'."
+			).format(reference_doctype),
+		)
+
+	status_field = (config.get("status_field") or "").strip()
+	paid_value = (config.get("paid_status_value") or "").strip()
+	if not (status_field and paid_value):
+		frappe.throw(
+			_(
+				"Cannot accept Pine Labs payments on {0}: its Payable Documents "
+				"row is missing 'Status Field' or 'Paid Status Value'. Without "
+				"both, the app has nowhere to record the payment after success."
+			).format(reference_doctype),
+		)
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # Creation
@@ -352,7 +416,11 @@ def _create_payment_entry_idempotent(transaction):
 	# Rule 4: standard ERPNext PE builder.
 	from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
 
-	if transaction.reference_doctype not in ("Sales Invoice", "POS Invoice", "Payment Request"):
+	if transaction.reference_doctype not in PE_NATIVE_DOCTYPES:
+		# Defence-in-depth: this should already have been caught at click time
+		# by validate_finalization_ready. Reaching here means a transaction
+		# was created via a code path that bypasses the click-time check
+		# (e.g. a direct test fixture). Keep the message actionable.
 		frappe.throw(
 			_("PE creation supports Sales Invoice / POS Invoice / Payment Request only. Got {0}. Either add support or set Create Payment Entry to 0 on this doctype's Payable Doctypes row.").format(
 				transaction.reference_doctype
@@ -393,7 +461,6 @@ def _get_payable_config(reference_doctype):
 			continue
 		return {
 			"doctype_name": row.doctype_name,
-			"button_label": row.button_label,
 			"is_enabled": cint(row.is_enabled),
 			"show_on_docstatus": row.show_on_docstatus,
 			"amount_field": row.amount_field,

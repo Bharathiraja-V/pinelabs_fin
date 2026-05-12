@@ -7,8 +7,9 @@ it end-to-end gives a complete picture: what the app does, why it exists, how
 it is structured, how to configure it, how to use it day-to-day, how to debug
 it, and what known sharp edges to avoid.
 
-Last updated: 2026-05-09
-Branch covered: phase-1-rewrite (post Phase 1 + Phase 2 + Pay-by-Link logging)
+Last updated: 2026-05-11
+Branch covered: phase-1-rewrite (post Phase 1 + Phase 2 + Pay-by-Link logging
+                + per-row button-render gating)
 
 
 ================================================================================
@@ -143,18 +144,26 @@ Pinelabs Transaction record + Payment Entry result:
 ================================================================================
 
 5.1 Pinelabs Settings (Single)
-    All app configuration. Sections:
-      - Basic Setup       — Enabled toggle, Machines child table, Terminal
-                            Routing Mode (Single Machine / Mapping), Machine
-                            Mappings child table.
+    All app configuration. Sections in form order:
+      - Basic Setup       — Enabled toggle.
+      - Machines          — Machines child table + Terminal Routing Mode
+                            (Single Machine / Mapping).
+      - Machine Mappings  — child table (visible only when Routing Mode =
+                            Mapping).
+      - Technical         — API Endpoints overrides, Auto Cancel Duration
+                            (Minutes). Placed above Plural so all terminal-
+                            related config sits together. The historical
+                            Verify SSL and Debug Mode toggles were removed
+                            (Verify SSL was never flipped off in production
+                            and only affected the Plural client; Debug Mode
+                            was never read by any code path).
       - Plural API        — Enable Payment Links, Plural Client ID,
                             Client Secret, Webhook Secret (HMAC), Plural
                             Base URL (editable, sandbox is the auto-fill),
                             Payment Link Expiry (Minutes), Last Sync.
       - Payable Documents — Payable Doctypes child table (per-doctype
-                            eligibility + customer-contact mapping).
-      - Technical         — API Endpoints overrides, Verify SSL, Debug
-                            Mode, Auto Cancel Duration (Minutes).
+                            eligibility + per-button toggles + docstatus
+                            gating + customer-contact mapping).
 
     Validation enforced in pinelabs_settings.py:
       - At most one machine may be Is Default. Empty machines table is OK.
@@ -187,16 +196,38 @@ Pinelabs Transaction record + Payment Entry result:
     the current context, the alphabetically-first machine name wins.
 
 5.4 Pinelabs Payable Doctype (Child of Pinelabs Settings.payable_doctypes)
-    One row per ERPNext doctype that can be paid via PineLabs.
-    Fields:
-      doctype_name, amount_field, status_field, paid_status_value,
-      finalize_via_payment_entry,
+    One row per ERPNext doctype that can be paid via PineLabs. The row
+    drives four independent gating axes consumed by
+    public/js/pinelabs_buttons.js (see section 6.1).
+
+    Eligibility & rendering:
+      doctype_name             — Source doctype (Link to DocType).
+      is_enabled               — Master toggle for the row.
+      show_on_docstatus        — "0" / "1" / "0,1" (default "1"). Parsed
+                                 into a Set of allowed docstatus values
+                                 by the JS. Cancelled (docstatus=2) is
+                                 never accepted.
+      enable_pay_on_machine    — Show/hide the "Pay on Machine" button
+                                 for this doctype (default 1).
+      enable_send_payment_link — Show/hide the "Send Payment Link" button
+                                 for this doctype (default 1).
+      amount_field             — Required. Currency/Float/Int/Percent field
+                                 on the source doc that holds the payable
+                                 amount.
+
+    Finalization:
+      status_field, paid_status_value, link_payment_entry_field,
+      finalize_via_payment_entry
+
+    Customer Contact Field Mapping (used by Send Payment Link, see §9):
       mobile_fetch_from, mobile_direct_field, mobile_link_field,
       mobile_linked_doctype, mobile_linked_field,
       email_fetch_from,  email_direct_field,  email_link_field,
       email_linked_doctype,  email_linked_field
-    The mapping fields are the dynamic Customer Contact Field Mapping —
-    see section 9.
+
+    Removed (do not re-add without wiring through):
+      button_label — was never consumed by the JS or transaction.py.
+                     Button labels are hard-coded English strings.
 
 5.5 Pinelabs Transaction (standalone, one-per-attempt)
     All transaction state. Fields:
@@ -266,8 +297,45 @@ patches/:
 
 public/js/:
   pinelabs_buttons.js              — Injects "Pay on Machine" + "Send Payment
-                                     Link" buttons. Eligibility check pulls
-                                     Payable Doctypes from Settings.
+                                     Link" buttons. Pulls Pinelabs Settings
+                                     (whole Single, not the child table —
+                                     see §6.1) and caches per-doctype gating
+                                     flags in PAYABLE.flags.
+
+6.1 Why the JS fetches the parent Single, not the child table directly
+    `frappe.db.get_list("Pinelabs Payable Doctype", { fields: [...] })`
+    silently drops Link and most custom fields when the doctype is a child
+    table — every row comes back with `name` populated and the requested
+    user-defined fields as `undefined`. Symptom: `doctype_name`,
+    `enable_pay_on_machine`, etc. are all `undefined`, the forEach skips
+    every row, seeded defaults stay in place, and per-row toggles silently
+    do nothing.
+
+    The JS works around this by calling `frappe.client.get` on the
+    "Pinelabs Settings" Single and iterating `doc.payable_doctypes`.
+    Child rows arrive fully hydrated. Cost: one extra round-trip, small
+    payload. Do not "fix" this back to get_list.
+
+6.2 Button render gating (four axes; all must pass)
+    For each Payable Doctype row the JS evaluates:
+      1. row.is_enabled == 1
+      2. frm.doc.docstatus ∈ parsed(show_on_docstatus)
+      3. outstanding_amount(frm) > 0  (reads outstanding_amount →
+         grand_total → amount → paid_amount; first non-null wins)
+      4. per-button: row.enable_pay_on_machine / enable_send_payment_link
+
+    Cache shape:
+      PAYABLE.flags: Map<doctype, {
+        pay_on_machine: bool,
+        send_payment_link: bool,
+        allowed_docstatus: Set<number>,
+      }>
+    Seeded synchronously for Sales Invoice / POS Invoice / Payment Request
+    with default flags (both buttons on, allowed_docstatus={1}) so first-
+    render doesn't race; the async parent-Single fetch then overrides each
+    entry with the saved row values. After the fetch lands the code re-
+    calls render_pinelabs_buttons(cur_frm) so the form picks up the
+    correct gating without a manual reload.
 
 scheduler:
   hooks.py scheduler_events["cron"] = {
@@ -324,18 +392,31 @@ scheduler:
     For each doctype you want PineLabs to be available on:
     1. Add a row in Payable Doctypes.
     2. doctype_name = "Sales Invoice" (or POS Invoice / Payment Request / etc.)
-    3. amount_field = "outstanding_amount" (or grand_total / amount).
-    4. If you do NOT want a Payment Entry created (some teams prefer to
+    3. Enabled = 1 (master toggle for this row).
+    4. Show on docstatus = "1" (Submitted, default) / "0" (Draft) /
+       "0,1" (both). Cancelled docs are always excluded by the JS.
+    5. Pay on Machine = 1 / Send Payment Link = 1. Untick one to hide
+       only that button on this doctype while keeping the row otherwise
+       active. Untick both and the row contributes no buttons (cleaner
+       than leaving the row Enabled but inert; consider just disabling
+       the row instead).
+    6. amount_field = "outstanding_amount" (or grand_total / amount).
+    7. If you do NOT want a Payment Entry created (some teams prefer to
        update a custom status field instead):
          - Untick "Create Payment Entry"
          - Set status_field + paid_status_value (e.g. "status" + "Paid").
-    5. Configure Customer Contact Field Mapping (see section 9). For
+    8. Configure Customer Contact Field Mapping (see section 9). For
        Sales Invoice the easiest setup is:
          - Mobile: Linked DocType → contact_person → Contact → mobile_no
          - Email:  Linked DocType → contact_person → Contact → email_id
        OR, if you prefer customer-level fallback:
          - Mobile: Linked DocType → customer → Customer → mobile_no
          - Email:  Linked DocType → customer → Customer → email_id
+
+    After saving, hard-reload (Ctrl+Shift+R) any open ERPNext form so
+    pinelabs_buttons.js picks up the new gating flags. There is no
+    realtime invalidation on Settings save — other tabs see stale flags
+    until they reload.
 
 7.5 Plural webhook configuration (in your Plural dashboard)
     URL:    https://<your-erpnext-host>/api/method/pinelabs_fin.api.webhook.handle_webhook

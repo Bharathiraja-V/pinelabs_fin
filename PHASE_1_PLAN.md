@@ -115,7 +115,7 @@ Single page, collapsible sections (no tabs in Phase 1):
 - **Basic Setup** (default open) — master enabled toggle, machine table with `is_default`, terminal selection method (locked to "Single Machine").
 - **Plural Configuration** (collapsed) — enable_payment_links, plural_client_id, plural_client_secret, plural_use_sandbox, plural_base_url, payment_link_webhook_secret. Read-only webhook URL with a copy button.
 - **Payable Documents** (collapsed) — existing `payable_doctypes` table. Validation: `Payment Entry` cannot be added.
-- **Technical** (collapsed) — API endpoint overrides, `verify_ssl`, debug toggle, auto-cancel duration for stuck transactions.
+- **Technical** (collapsed) — API endpoint overrides, auto-cancel duration for stuck transactions.
 
 The old `payment_modes` child table is gone.
 

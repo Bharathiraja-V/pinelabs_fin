@@ -27,7 +27,6 @@ from datetime import datetime
 import frappe
 import requests
 from frappe import _
-from frappe.utils import cint
 
 # Canonical Plural API hosts. Single source of truth — also referenced by
 # pinelabs_settings.PinelabsSettings._resolve_plural_base_url to surface the
@@ -82,7 +81,7 @@ class PluralClient:
 				headers=headers,
 				json=payload,
 				timeout=30,
-				verify=self._verify_ssl(),
+				verify=True,
 			)
 			data = response.json() if response.text else {}
 		except Exception as exc:
@@ -136,7 +135,7 @@ class PluralClient:
 				url,
 				headers=headers,
 				timeout=30,
-				verify=self._verify_ssl(),
+				verify=True,
 			)
 			data = response.json() if response.text else {}
 		except Exception as exc:
@@ -215,9 +214,6 @@ class PluralClient:
 			"x-plural-client-secret": client_secret or "",
 		}
 
-	def _verify_ssl(self) -> bool:
-		return bool(cint(getattr(self.settings, "verify_ssl", 1)))
-
 	def _get_plural_access_token(self) -> tuple[str | None, str | None]:
 		"""Fetch (or reuse cached) OAuth2 bearer token from Plural.
 
@@ -246,7 +242,7 @@ class PluralClient:
 		print(req_dump)
 		frappe.logger("pinelabs_paybylink", file_count=5).info(req_dump)
 		try:
-			response = requests.post(url, json=payload, timeout=15, verify=self._verify_ssl())
+			response = requests.post(url, json=payload, timeout=15, verify=True)
 			data = response.json() if response.text else {}
 		except Exception as exc:
 			print(f"[PineLabs PayByLink] Token ERROR: {exc}")

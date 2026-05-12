@@ -43,6 +43,72 @@ class PinelabsTransaction(Document):
 		self._lock_flow_type()
 		self._enforce_status_transition()
 		self._validate_machine()
+		self._enforce_unique_provider_ids()
+
+	def _enforce_unique_provider_ids(self):
+		"""Reject any save that would put a duplicate ``payment_id`` or
+		``order_id`` on this row — but only when the existing row could
+		still cause harm.
+
+		Collision risk by status of the existing row:
+		  INITIATED / PENDING — two ACTIVE transactions racing for the same
+		                       upstream payment. Reject — real concurrency
+		                       risk in any environment.
+		  SUCCESS / FAILED /  — existing row is in a terminal state and can
+		  CANCELLED            never re-finalize. Permitting the new row to
+		                       reuse the id is safe for two reasons:
+		                       (a) in production Pine Labs assigns globally
+		                       unique payment ids so this can't happen;
+		                       (b) for the local simulator (which recycles
+		                       ids after restart) the only residual risk is
+		                       that a SI/POSI/PR new row could silently
+		                       inherit the old row's Payment Entry via the
+		                       reference_no check — caught by the existing
+		                       tabPayment Entry.reference_no UNIQUE
+		                       convention on the ERPNext side.
+
+		Historical rows from before this controller check was added are
+		untouched — we only validate against *other* rows at save time.
+		"""
+		# Statuses where re-using the provider id on a new row is unsafe.
+		BLOCKING_STATUSES = ("INITIATED", "PENDING")
+
+		for field in ("payment_id", "order_id"):
+			value = (self.get(field) or "").strip()
+			if not value:
+				continue
+			if self._field_unchanged(field, value):
+				continue
+			clash = frappe.db.get_value(
+				"Pinelabs Transaction",
+				{
+					field: value,
+					"name": ("!=", self.name or ""),
+				},
+				["name", "status"],
+				as_dict=True,
+			)
+			if not clash:
+				continue
+			if clash.status not in BLOCKING_STATUSES:
+				# Existing row is in a terminal state (SUCCESS / FAILED /
+				# CANCELLED) → safe to reuse the id; the existing row
+				# cannot transition further.
+				continue
+			frappe.throw(
+				_(
+					"Pinelabs Transaction {0} is still {3} and already has "
+					"{1}={2}. Two active transactions cannot share a provider id."
+				).format(clash.name, field, value, clash.status),
+			)
+
+	def _field_unchanged(self, field, value):
+		if self.is_new():
+			return False
+		previous = self.get_doc_before_save()
+		if not previous:
+			return False
+		return (previous.get(field) or "").strip() == value
 
 	def _validate_machine(self):
 		"""``machine`` is a Data field holding a Pinelabs Machine Config row's

@@ -51,6 +51,9 @@ def initiate_payment_link(
 		frappe.throw(_("Unknown flow: {0}").format(flow))
 
 	source_doc = _load_eligible_source(reference_doctype, reference_name)
+	# Fail fast BEFORE we ask Plural to deliver a link — if finalization
+	# won't work for this doctype, the customer should never see the link.
+	txn_service.validate_finalization_ready(reference_doctype)
 	amount = _amount_for(source_doc)
 	if amount <= 0:
 		frappe.throw(_("No outstanding amount on {0} {1}.").format(reference_doctype, reference_name))

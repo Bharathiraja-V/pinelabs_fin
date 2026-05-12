@@ -7,9 +7,10 @@
  "engine": "InnoDB",
  "field_order": [
   "doctype_name",
-  "button_label",
   "show_on_docstatus",
   "is_enabled",
+  "enable_pay_on_machine",
+  "enable_send_payment_link",
   "amount_field",
   "status_field",
   "paid_status_value",
@@ -39,14 +40,6 @@
    "reqd": 1
   },
   {
-   "default": "Pay via Pinelabs",
-   "description": "Optional override for the Pine Labs button group label on this doctype.",
-   "fieldname": "button_label",
-   "fieldtype": "Data",
-   "in_list_view": 1,
-   "label": "Button label"
-  },
-  {
    "default": "1",
    "description": "Use 0 for Drafts, 1 for Submitted, or 0,1 for both. Cancelled documents are always excluded.",
    "fieldname": "show_on_docstatus",
@@ -62,6 +55,22 @@
    "fieldtype": "Check",
    "in_list_view": 1,
    "label": "Enabled"
+  },
+  {
+   "default": "1",
+   "description": "Show the 'Pay on Machine' button on this doctype. Uncheck to hide the terminal-payment button while leaving the row enabled.",
+   "fieldname": "enable_pay_on_machine",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Pay on Machine"
+  },
+  {
+   "default": "1",
+   "description": "Show the 'Send Payment Link' button on this doctype. Uncheck to hide the Pay-by-Link button while leaving the row enabled.",
+   "fieldname": "enable_send_payment_link",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Send Payment Link"
   },
   {
    "description": "Field on the source doctype that holds the payable amount (e.g. outstanding_amount, grand_total).",

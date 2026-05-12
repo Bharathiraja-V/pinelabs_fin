@@ -12,6 +12,9 @@
   "terminal_routing_mode",
   "machine_mappings_section",
   "machine_mappings",
+  "technical_section",
+  "api_endpoints",
+  "auto_cancel_duration_minutes",
   "plural_section",
   "enable_payment_links",
   "plural_client_id",
@@ -22,12 +25,7 @@
   "payment_link_expiry_minutes",
   "last_sync",
   "payable_documents_section",
-  "payable_doctypes",
-  "technical_section",
-  "api_endpoints",
-  "verify_ssl",
-  "debug_mode",
-  "auto_cancel_duration_minutes"
+  "payable_doctypes"
  ],
  "fields": [
   {
@@ -162,20 +160,6 @@
    "fieldtype": "Table",
    "label": "API Endpoints",
    "options": "Pinelabs API Endpoints"
-  },
-  {
-   "default": "1",
-   "description": "Verify TLS certificates on outbound API calls. Disable only for local simulators.",
-   "fieldname": "verify_ssl",
-   "fieldtype": "Check",
-   "label": "Verify SSL"
-  },
-  {
-   "default": "0",
-   "description": "Log full request/response payloads for every API call. Noisy; use only when troubleshooting.",
-   "fieldname": "debug_mode",
-   "fieldtype": "Check",
-   "label": "Debug Mode"
   },
   {
    "description": "Auto-cancel pending transactions after this many minutes. Default 3 if 0/empty.",

@@ -41,6 +41,9 @@ def initiate_terminal_payment(
 	)
 
 	source_doc = _load_eligible_source(reference_doctype, reference_name)
+	# Fail fast BEFORE we contact Pine Labs — if finalization won't work for
+	# this doctype, the customer should never be asked to tap their card.
+	txn_service.validate_finalization_ready(reference_doctype)
 	mode_doc = _load_pinelabs_mode(mode_of_payment, expected_flows=("Terminal", "Both"))
 	resolved_amount = flt(amount) if amount else _amount_for(source_doc)
 	if resolved_amount <= 0:
