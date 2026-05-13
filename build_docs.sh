@@ -78,7 +78,7 @@ img[src*="img.shields.io"] { display: inline-block; height: 20px; margin: 4px 4p
 
 /* Logos: no border / shadow, inline-block so they sit side-by-side in the
    centered hero block at the top of README.md and inside the footer line. */
-img[src*="/logos/"] {
+img[src*="logos/"] {
 	display: inline-block;
 	border: none;
 	box-shadow: none;
@@ -86,10 +86,22 @@ img[src*="/logos/"] {
 	vertical-align: middle;
 }
 
+/* The two-corner logo bar at the top of README.md. The outer <table> has
+   class="logo-bar"; this rule strips all the default table styling so the
+   row reads as two free-floating logos at the page edges. */
+table.logo-bar,
+table.logo-bar tr,
+table.logo-bar td {
+	border: none !important;
+	background: transparent !important;
+	padding: 0 !important;
+	margin: 0 !important;
+}
+
 /* Content images (screenshots, diagrams) — give them a soft border + shadow
    so they read as "this is an image" against the page background. Badges
    and logos are reset elsewhere. */
-img:not([src*="img.shields.io"]):not([src*="/logos/"]) {
+img:not([src*="img.shields.io"]):not([src*="logos/"]) {
 	display: block;
 	max-width: 100%;
 	height: auto;
