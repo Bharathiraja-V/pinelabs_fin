@@ -46,36 +46,34 @@ PE_NATIVE_DOCTYPES = ("Sales Invoice", "POS Invoice", "Payment Request")
 
 
 def validate_finalization_ready(reference_doctype):
-	"""Refuse to start a payment when the app can't finish it cleanly.
+	"""Refuse to start a payment when the app cannot finish it CLEANLY.
 
-	Called from the click-time initiate APIs in terminal.py and plural.py
-	BEFORE the upstream gateway is contacted. Closes the failure-after-the-
-	customer-paid gap.
-
-	Two valid configurations:
+	Three valid configurations:
 	1. reference_doctype is one of PE_NATIVE_DOCTYPES → ERPNext's
-	   get_payment_entry will build the PE on success.
+	   ``get_payment_entry`` will build the PE on success. No setup needed.
 	2. A Payable Documents row exists with finalize_via_payment_entry = 0
 	   AND status_field AND paid_status_value populated → mark_success will
-	   take the mapped-finalization branch instead of trying to build a PE.
+	   write to the configured field on the source doc.
+	3. No Payable Documents row at all → permissive: the payment will
+	   proceed and the Pinelabs Transaction will record SUCCESS, but the
+	   source doc is **not** auto-updated. The caller (custom button,
+	   external system) is responsible for reacting to the
+	   ``pinelabs_txn_update`` realtime event or polling the Pinelabs
+	   Transaction status if they want the source doc to reflect payment.
 
-	Anything else throws here so the cashier sees the setup gap before the
-	terminal beeps or the link is generated.
+	The only case that still throws is (4) — a misconfigured Payable
+	Documents row (finalize_via_pe = 1 on a non-PE-native doctype, or
+	missing required mapping fields). That's an admin-side error worth
+	surfacing loudly before the customer is asked to pay.
 	"""
 	if reference_doctype in PE_NATIVE_DOCTYPES:
 		return
 
 	config = _get_payable_config(reference_doctype)
 	if not config:
-		frappe.throw(
-			_(
-				"Cannot accept Pine Labs payments on {0} yet.\n\n"
-				"Open Pinelabs Settings → Payable Documents, add a row for {0}, "
-				"untick 'Create Payment Entry', and set 'Status Field' + 'Paid "
-				"Status Value' so the app knows how to record the payment after "
-				"the customer pays."
-			).format(reference_doctype),
-		)
+		# Permissive — see docstring case (3). Payment proceeds; source
+		# doc is not auto-finalized.
+		return
 
 	if cint(config.get("finalize_via_payment_entry", 1)):
 		frappe.throw(
@@ -87,7 +85,9 @@ def validate_finalization_ready(reference_doctype):
 				"the customer paid.\n\n"
 				"Fix: open the row in Pinelabs Settings → Payable Documents, "
 				"untick 'Create Payment Entry', and set 'Status Field' + 'Paid "
-				"Status Value'."
+				"Status Value'. Or delete the row entirely to use the permissive "
+				"path (Pinelabs Transaction records the payment; source doc is "
+				"left untouched)."
 			).format(reference_doctype),
 		)
 
@@ -97,8 +97,9 @@ def validate_finalization_ready(reference_doctype):
 		frappe.throw(
 			_(
 				"Cannot accept Pine Labs payments on {0}: its Payable Documents "
-				"row is missing 'Status Field' or 'Paid Status Value'. Without "
-				"both, the app has nowhere to record the payment after success."
+				"row has 'Create Payment Entry' unticked but is missing 'Status "
+				"Field' or 'Paid Status Value'. Fill both, or delete the row to "
+				"use the permissive path."
 			).format(reference_doctype),
 		)
 
@@ -417,15 +418,54 @@ def _create_payment_entry_idempotent(transaction):
 	from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
 
 	if transaction.reference_doctype not in PE_NATIVE_DOCTYPES:
-		# Defence-in-depth: this should already have been caught at click time
-		# by validate_finalization_ready. Reaching here means a transaction
-		# was created via a code path that bypasses the click-time check
-		# (e.g. a direct test fixture). Keep the message actionable.
+		# Two sub-cases here:
+		# 1. No Payable Documents row → permissive path. The caller chose
+		#    to skip configuration; mark the Pinelabs Transaction as
+		#    SUCCESS without touching the source doc. They can react to
+		#    the pinelabs_txn_update realtime event if they want their
+		#    source doc updated.
+		# 2. Row exists with finalize_via_payment_entry = 1 (misconfig).
+		#    validate_finalization_ready should have caught this at click
+		#    time. Reaching here means a code path bypassed it (e.g. a
+		#    direct test fixture). Throw with the actionable message.
+		if not config:
+			return None
 		frappe.throw(
 			_("PE creation supports Sales Invoice / POS Invoice / Payment Request only. Got {0}. Either add support or set Create Payment Entry to 0 on this doctype's Payable Doctypes row.").format(
 				transaction.reference_doctype
 			),
 		)
+
+	# Conflict guard — source doc already fully paid by something else?
+	#
+	# If a cashier (or any other path) recorded a Payment Entry manually
+	# while our Pine Labs payment was in flight, the source doc's
+	# Outstanding will already be 0 by the time we get here. ERPNext's
+	# get_payment_entry would throw in that case ("nothing to pay"),
+	# the savepoint in mark_success would roll back, and the Pinelabs
+	# Transaction would stay PENDING — with the money already debited
+	# from the customer on the Pine Labs side.
+	#
+	# Instead, we detect the conflict, write a clear note onto the
+	# transaction, and return None. mark_success will then complete the
+	# transaction as SUCCESS (because the customer DID pay) but leave
+	# payment_entry empty and error_message populated. The operator
+	# sees the conflict on the Pinelabs Transaction record and can do
+	# manual reconciliation.
+	source = frappe.get_doc(transaction.reference_doctype, transaction.reference_name)
+	outstanding = flt(getattr(source, "outstanding_amount", 0) or 0)
+	if outstanding <= 0:
+		conflict_msg = (
+			f"Customer paid {flt(transaction.amount):.2f} via Pine Labs "
+			f"(payment_id {transaction.payment_id}), but {transaction.reference_doctype} "
+			f"{transaction.reference_name} was already fully paid by another "
+			f"Payment Entry. Manual reconciliation required — either refund the "
+			f"Pine Labs charge or cancel the conflicting Payment Entry and re-run "
+			f"Refresh Status on this transaction."
+		)
+		transaction.error_message = conflict_msg[:1000]
+		frappe.log_error(conflict_msg, "Pinelabs PE conflict")
+		return None
 
 	pe = get_payment_entry(transaction.reference_doctype, transaction.reference_name)
 
@@ -442,6 +482,10 @@ def _create_payment_entry_idempotent(transaction):
 		f"Pinelabs Transaction: {transaction.name}."
 	)
 
+	# Bypass flag for conflict_guard.refuse_if_pinelabs_active — without
+	# this our own PE insertion would trip the validate hook because
+	# THIS Pinelabs Transaction is still in PENDING at this exact moment.
+	pe.flags.pinelabs_internal_pe = True
 	pe.flags.ignore_permissions = True
 	pe.insert()
 	pe.submit()

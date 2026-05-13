@@ -75,6 +75,29 @@ p { margin: 0.6em 0; }
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 img[src*="img.shields.io"] { display: inline-block; height: 20px; margin: 4px 4px 4px 0; vertical-align: middle; }
+
+/* Logos: no border / shadow, inline-block so they sit side-by-side in the
+   centered hero block at the top of README.md and inside the footer line. */
+img[src*="/logos/"] {
+	display: inline-block;
+	border: none;
+	box-shadow: none;
+	margin: 4px 12px;
+	vertical-align: middle;
+}
+
+/* Content images (screenshots, diagrams) — give them a soft border + shadow
+   so they read as "this is an image" against the page background. Badges
+   and logos are reset elsewhere. */
+img:not([src*="img.shields.io"]):not([src*="/logos/"]) {
+	display: block;
+	max-width: 100%;
+	height: auto;
+	margin: 0.8em auto;
+	border: 1px solid var(--border);
+	border-radius: 6px;
+	box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
 ul, ol { padding-left: 1.8em; margin: 0.6em 0; }
 li + li { margin-top: 0.25em; }
 blockquote {
@@ -117,12 +140,27 @@ hr { border: 0; border-top: 1px solid var(--border); margin: 1.5em 0; }
 	tr, pre, blockquote, table { page-break-inside: avoid; }
 	h1, h2, h3 { page-break-after: avoid; }
 }
+
+/* Apply via a wrapping <div class="keep-together"> in the markdown — keeps
+   the heading + paragraph + image (or any other group of elements) on the
+   same printed page. Use sparingly; large blocks may still spill if they
+   are taller than a single A4 page. */
+.keep-together {
+	page-break-inside: avoid;
+	break-inside: avoid;
+}
 """
 
 title = f"pinelabs_fin — {'User Guide' if base.lower() == 'readme' else 'Guide'}"
+# Base href = the markdown source's directory. Lets relative image paths
+# like `docs/assets/screenshots/foo.png` resolve against the repo root
+# when Chrome renders the temp HTML at /tmp/.
+src_dir = pathlib.Path(md_path).resolve().parent
+base_href = f"file://{src_dir}/"
 html = (
 	"<!doctype html><html lang=\"en\"><head>"
 	"<meta charset=\"utf-8\" />"
+	f"<base href=\"{base_href}\" />"
 	f"<title>{title}</title>"
 	f"<style>{css}</style>"
 	"</head><body><div class=\"wrap\">" + body + "</div></body></html>"

@@ -473,30 +473,65 @@ frappe.pinelabs = frappe.pinelabs || {};
 	// Send Payment Link flow
 	// ─────────────────────────────────────────────────────────────────
 
+	// Thin wrapper for the auto-injected Send Payment Link button.
+	// Defers to the global utility below — no behavioural fork.
 	function start_payment_link(frm, flow) {
-		frappe.call({
-			method: "pinelabs_fin.api.plural.initiate_payment_link",
-			args: {
+		frappe.pinelabs.start_payment_link(
+			{
 				reference_doctype: frm.doctype,
 				reference_name: frm.docname,
 				flow,
 			},
+			{
+				on_link: () => frm.reload_doc(),
+				on_error: (msg) => {
+					show_error(__("Payment link failed"), msg);
+					frm.reload_doc();
+				},
+			},
+		);
+	}
+
+	// Public utility: call the initiate API for the Plural Pay-by-Link flow.
+	// On success, shows the standard "Payment Link Generated" popup with the
+	// URL. No polling modal — the customer pays asynchronously (SMS/email),
+	// the webhook + 1-min cron finalize the transaction in the background.
+	//
+	// Usage:
+	//   frappe.pinelabs.start_payment_link(
+	//     { reference_doctype, reference_name, flow?: "all_methods", expiry_minutes?: 60 },
+	//     {
+	//       on_link(url, txn) { ... },    // success — link generated
+	//       on_error(msg)     { ... },    // API rejected (validation, OAuth, ...)
+	//       show_popup: true,             // default true; set false to suppress the standard popup
+	//     }
+	//   );
+	frappe.pinelabs.start_payment_link = function (args, options) {
+		options = options || {};
+		const on_link = typeof options.on_link === "function" ? options.on_link : function () {};
+		const on_error = typeof options.on_error === "function"
+			? options.on_error
+			: (msg) => show_error(__("Payment link failed"), msg);
+		const show_popup = options.show_popup !== false;
+
+		return frappe.call({
+			method: "pinelabs_fin.api.plural.initiate_payment_link",
+			args: args,
 			freeze: true,
 			freeze_message: __("Generating payment link..."),
 			callback(r) {
 				const msg = r.message || {};
 				if (!msg.success) {
-					show_error(__("Payment link failed"), msg.error || msg.message);
-					if (msg.transaction_name) frm.reload_doc();
+					on_error(msg.message || msg.error || __("Unknown error"));
 					return;
 				}
-				if (msg.payment_link_url) {
+				if (show_popup && msg.payment_link_url) {
 					show_link_result(msg.payment_link_url);
 				}
-				frm.reload_doc();
+				on_link(msg.payment_link_url, msg.transaction_name);
 			},
 		});
-	}
+	};
 
 	function show_link_result(url) {
 		frappe.msgprint({

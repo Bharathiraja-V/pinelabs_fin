@@ -212,6 +212,16 @@ class PinelabsTestPaymentPage {
 					on_settled: (status, txn) => {
 						this.disable_buttons(false);
 						if (status === "SUCCESS") {
+							// If the Payable Documents row is configured for
+							// Test Payment, the server already wrote payment_status
+							// = "Paid" via mapped-finalization. If not, the server
+							// took the permissive path and left it alone — so we
+							// nudge it ourselves here. Double-write is harmless
+							// (same value). Errors are swallowed (read-only field
+							// on submitted docs, etc.).
+							frappe.db
+								.set_value("Test Payment", name, "payment_status", "Paid")
+								.catch(() => {});
 							this.show_status(
 								`<div class="text-success"><strong>${__("Payment SUCCESS")}</strong>
 									· ${label}<br>
@@ -254,6 +264,19 @@ class PinelabsTestPaymentPage {
 
 	async handle_link() {
 		const inputs = this.read_inputs();
+		// Same defensive check as handle_terminal — fail fast with a clear
+		// message if the shared utility hasn't loaded into this browser tab.
+		if (typeof frappe.pinelabs?.start_payment_link !== "function") {
+			this.show_status(
+				`<div class="text-danger">
+					<strong>${__("App utility missing")}.</strong>
+					${__("The shared payment helper has not loaded in this browser tab.")}<br>
+					<small>${__("Run")}: <code>bench build --app pinelabs_fin</code>
+					${__("then hard-reload this page (Ctrl+Shift+R, or open DevTools → right-click reload → Empty Cache and Hard Reload).")}</small>
+				</div>`,
+			);
+			return;
+		}
 		this.disable_buttons(true);
 		this.show_status(
 			`<div class="text-muted"><i class="fa fa-spinner fa-spin"></i>
@@ -268,31 +291,43 @@ class PinelabsTestPaymentPage {
 					<small>${__("Source doc")}: ${name}</small></div>`,
 			);
 
-			const r = await frappe.call({
-				method: "pinelabs_fin.api.plural.initiate_payment_link",
-				args: {
+			// Delegate to the global utility — same call the built-in Send
+			// Payment Link button uses. The page passes Email / Mobile
+			// directly to the API so the server's Customer Contact Field
+			// Mapping resolver is bypassed for this caller.
+			//
+			// show_popup is left at its default (true) so the standard
+			// green "Payment Link Generated" popup with the URL appears,
+			// identical to the one on Sales Invoice's built-in button.
+			frappe.pinelabs.start_payment_link(
+				{
 					reference_doctype: "Test Payment",
 					reference_name: name,
 					flow: "all_methods",
+					customer_email: inputs.email,
+					customer_mobile: inputs.mobile,
 				},
-			});
-			const msg = r.message || {};
-			this.disable_buttons(false);
-			if (!msg.success) {
-				this.show_status(
-					`<div class="text-danger"><strong>${__("Failed")}:</strong>
-						${frappe.utils.escape_html(msg.message || msg.error || "")}</div>`,
-				);
-				return;
-			}
-			this.show_status(
-				`<div class="text-success">
-					<strong>${__("Link generated")}</strong>
-					· ${__("Pine Labs has sent it to the customer by SMS and email.")}<br>
-					<small>${__("Transaction")}: ${msg.transaction_name}</small>
-				</div>`,
+				{
+					on_link: (url, txn) => {
+						this.disable_buttons(false);
+						this.show_status(
+							`<div class="text-success">
+								<strong>${__("Link generated")}</strong>
+								· ${__("Pine Labs has sent it to the customer by SMS and email.")}<br>
+								<small>${__("Transaction")}: ${txn}</small>
+							</div>`,
+						);
+						if (url) this.show_link(url);
+					},
+					on_error: (errmsg) => {
+						this.disable_buttons(false);
+						this.show_status(
+							`<div class="text-danger"><strong>${__("Failed")}:</strong>
+								${frappe.utils.escape_html(errmsg)}</div>`,
+						);
+					},
+				},
 			);
-			if (msg.payment_link_url) this.show_link(msg.payment_link_url);
 		} catch (err) {
 			this.disable_buttons(false);
 			this.show_status(

@@ -36,8 +36,20 @@ def initiate_payment_link(
 	reference_name: str,
 	flow: str = "all_methods",
 	expiry_minutes: int | None = None,
+	customer_email: str | None = None,
+	customer_mobile: str | None = None,
 ) -> dict:
 	"""Single entry point for the Pay-by-Link flow.
+
+	``customer_email`` / ``customer_mobile`` are optional inline overrides
+	for the customer contact resolution. When the caller already has the
+	values (e.g. a custom button collected them from a form), passing them
+	here bypasses the Customer Contact Field Mapping for that channel. If
+	either is omitted, the resolver fills in the missing one from the
+	source doc / Payable Documents row config. So:
+	  - pass both       → no resolver lookup is consulted for either
+	  - pass one        → resolver still fills the other (if it can)
+	  - pass neither    → full legacy behaviour (resolver only)
 
 	Returns:
 	  {success, transaction_name, payment_link_url, payment_link_id, message}
@@ -58,7 +70,14 @@ def initiate_payment_link(
 	if amount <= 0:
 		frappe.throw(_("No outstanding amount on {0} {1}.").format(reference_doctype, reference_name))
 
+	# Start with whatever the resolver can find on the source doc; the
+	# caller's inline values (if any) take precedence below.
 	customer = _get_customer_details(source_doc)
+	if customer_email:
+		customer["email_id"] = (customer_email or "").strip()
+	if customer_mobile:
+		customer["mobile_number"] = (customer_mobile or "").strip()
+
 	if not (customer.get("email_id") or customer.get("mobile_number")):
 		from pinelabs_fin.api.customer_contact import describe_resolution
 
@@ -66,7 +85,13 @@ def initiate_payment_link(
 		frappe.throw(
 			_("Customer email or mobile is required to send a payment link.")
 			+ "<br><br>"
-			+ _("Resolver trace (see Pinelabs Settings → Payable Documents → Customer Contact Field Mapping):")
+			+ _(
+				"Either pass `customer_email` / `customer_mobile` directly when "
+				"calling the API, or configure Customer Contact Field Mapping in "
+				"Pinelabs Settings → Payable Documents."
+			)
+			+ "<br><br>"
+			+ _("Resolver trace:")
 			+ "<pre style='white-space:pre-wrap;'>"
 			+ frappe.utils.escape_html(frappe.as_json(trace, indent=2))
 			+ "</pre>",

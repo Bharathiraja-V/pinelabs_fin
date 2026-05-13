@@ -28,11 +28,11 @@
   {"description": "Used by Send Payment Link to deliver the link via email.", "fieldname": "customer_email", "fieldtype": "Data", "in_list_view": 1, "label": "Customer Email", "options": "Email"},
   {"description": "Used by Send Payment Link to deliver the link via SMS.", "fieldname": "customer_mobile", "fieldtype": "Data", "in_list_view": 1, "label": "Customer Mobile", "options": "Phone"},
   {"fieldname": "payment_section", "fieldtype": "Section Break", "label": "Payment Result"},
-  {"default": "Unpaid", "description": "Set to 'Paid' by the app after a successful Pine Labs payment.", "fieldname": "payment_status", "fieldtype": "Data", "in_list_view": 1, "in_standard_filter": 1, "label": "Payment Status", "read_only": 1},
-  {"description": "Records which mode of payment the customer used (CARD or UPI or method via link). Populated by the app after success.", "fieldname": "payment_method", "fieldtype": "Data", "in_list_view": 1, "label": "Payment Method", "read_only": 1},
+  {"allow_on_submit": 1, "default": "Unpaid", "description": "Set to 'Paid' by the app after a successful Pine Labs payment.", "fieldname": "payment_status", "fieldtype": "Data", "in_list_view": 1, "in_standard_filter": 1, "label": "Payment Status", "read_only": 1},
+  {"allow_on_submit": 1, "description": "Records which mode of payment the customer used (CARD or UPI or method via link). Populated by the app after success.", "fieldname": "payment_method", "fieldtype": "Data", "in_list_view": 1, "label": "Payment Method", "read_only": 1},
   {"fieldname": "column_break_payment", "fieldtype": "Column Break"},
-  {"description": "The Pinelabs Transaction this payment used.", "fieldname": "pinelabs_transaction", "fieldtype": "Link", "label": "Pinelabs Transaction", "options": "Pinelabs Transaction", "read_only": 1},
-  {"description": "When the payment was confirmed.", "fieldname": "paid_on", "fieldtype": "Datetime", "label": "Paid On", "read_only": 1}
+  {"allow_on_submit": 1, "description": "The Pinelabs Transaction this payment used.", "fieldname": "pinelabs_transaction", "fieldtype": "Link", "label": "Pinelabs Transaction", "options": "Pinelabs Transaction", "read_only": 1},
+  {"allow_on_submit": 1, "description": "When the payment was confirmed.", "fieldname": "paid_on", "fieldtype": "Datetime", "label": "Paid On", "read_only": 1}
  ],
  "index_web_pages_for_search": 1,
  "links": [],

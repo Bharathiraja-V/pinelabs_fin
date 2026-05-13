@@ -137,13 +137,16 @@ app_include_js = ["/assets/pinelabs_fin/js/pinelabs_buttons.js"]
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+# Refuse a manual Payment Entry when a Pine Labs payment is in flight
+# for the same source doc. Pairs with the finalize-time guard in
+# api/transaction.py so the two payment flows can never silently
+# double-record the same invoice. Our own PEs bypass this via
+# flags.pinelabs_internal_pe.
+doc_events = {
+	"Payment Entry": {
+		"validate": "pinelabs_fin.api.conflict_guard.refuse_if_pinelabs_active",
+	},
+}
 
 # Scheduled Tasks
 # ---------------
