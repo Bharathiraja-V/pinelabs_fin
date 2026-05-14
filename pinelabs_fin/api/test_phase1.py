@@ -20,13 +20,14 @@ from frappe.utils import cint
 class TestTransactionStateMachine(unittest.TestCase):
 	"""Pinelabs Transaction controller + transaction.py state transitions."""
 
-	@classmethod
-	def setUpClass(cls):
-		cls._invoice = _make_test_invoice()
-
 	def setUp(self):
-		# Each test gets its own transaction; we tear down via rollback.
+		# Per-test invoice + transaction so each test fully tears down via
+		# rollback. Moving this off `setUpClass` matters because tearDown's
+		# rollback unwinds the invoice along with everything else — running
+		# the invoice creation once at class-level leaves later tests staring
+		# at a LinkValidationError when they reference a long-rolled-back row.
 		from pinelabs_fin.api import transaction as txn_service
+		self._invoice = _make_test_invoice()
 		self.txn = txn_service.create_transaction(
 			reference_doctype="Sales Invoice",
 			reference_name=self._invoice.name,
@@ -103,10 +104,16 @@ class TestPaymentEntryGuards(unittest.TestCase):
 
 		from pinelabs_fin.api import transaction as txn_service
 
+		# Per-run unique reference_no so this test is isolated from prior
+		# runs. ``mark_success`` commits internally, so a hardcoded value
+		# would accumulate one extra PE in the DB per run and the count
+		# assertion below would drift away from 1 forever.
+		ref_no = f"PAY-PRE-EXISTING-{frappe.generate_hash(length=8)}"
+
 		# Pre-create a PE manually.
 		pe = get_payment_entry("Sales Invoice", self._invoice.name)
 		pe.mode_of_payment = "PineLabs - UPI"
-		pe.reference_no = "PAY-PRE-EXISTING"
+		pe.reference_no = ref_no
 		pe.reference_date = frappe.utils.nowdate()
 		pe.flags.ignore_permissions = True
 		pe.insert()
@@ -114,11 +121,11 @@ class TestPaymentEntryGuards(unittest.TestCase):
 
 		# Now mark the transaction success with the same reference_no.
 		txn = self._make_txn_in_pending()
-		txn = txn_service.mark_success(txn, payment_id="PAY-PRE-EXISTING", payment_method="UPI")
+		txn = txn_service.mark_success(txn, payment_id=ref_no, payment_method="UPI")
 
 		# The transaction should link to the existing PE, not a new one.
 		self.assertEqual(txn.payment_entry, pe.name)
-		count = frappe.db.count("Payment Entry", {"reference_no": "PAY-PRE-EXISTING"})
+		count = frappe.db.count("Payment Entry", {"reference_no": ref_no})
 		self.assertEqual(count, 1)
 
 
@@ -173,9 +180,12 @@ class TestWebhookSignature(unittest.TestCase):
 class TestTerminalInitiate(unittest.TestCase):
 	"""terminal.initiate_terminal_payment with the Pine Labs HTTP client mocked."""
 
-	@classmethod
-	def setUpClass(cls):
-		cls._invoice = _make_test_invoice()
+	def setUp(self):
+		# Per-test invoice — same reason as TestTransactionStateMachine.
+		# `_ensure_default_machine` is idempotent so re-running it per-test
+		# costs effectively nothing and keeps the fixture intact across
+		# the tearDown rollback.
+		self._invoice = _make_test_invoice()
 		_ensure_default_machine()
 
 	def tearDown(self):

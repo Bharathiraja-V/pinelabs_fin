@@ -56,7 +56,10 @@ class PluralClient:
 		return self._get_plural_access_token()
 
 	def create_payment_link(self, payload: dict) -> dict:
-		"""POST /api/pay/v1/payment-links — Plural hosted Pay-by-Link.
+		"""POST /api/pay/v1/paymentlink — Plural hosted Pay-by-Link.
+
+		URL pattern matches Pine Labs' published Pay-by-Link API docs:
+		https://developer.pinelabsonline.com/reference/payment-link-create
 
 		Returns {success, payment_link_url, payment_link_id, status, raw} or
 		{success: False, error}.
@@ -65,7 +68,7 @@ class PluralClient:
 		if not token:
 			return {"success": False, "error": error}
 
-		url = f"{self._get_base_url()}/api/pay/v1/payment-links"
+		url = f"{self._get_base_url()}/api/pay/v1/paymentlink"
 		headers = self._headers(token)
 		req_dump = (
 			f"[PineLabs PayByLink] Link Request:\n"
@@ -111,17 +114,16 @@ class PluralClient:
 		}
 
 	def get_payment_link_status(self, merchant_ref: str) -> dict:
-		"""GET /api/pay/v1/payment-links/merchant/{merchant_ref}.
+		"""GET /api/pay/v1/paymentlink/ref/{merchant_payment_link_reference}.
 
-		NOTE: published Pine Labs docs show /paymentlink/ref/{ref}; the
-		local simulator uses /payment-links/merchant/{ref}. Keep aligned
-		with the simulator until production divergence is confirmed.
+		URL pattern matches Pine Labs' published Pay-by-Link API docs:
+		https://developer.pinelabsonline.com/reference/payment-link-get-by-merchant-payment-link-reference
 		"""
 		token, error = self._get_plural_access_token()
 		if not token:
 			return {"success": False, "error": error}
 
-		url = f"{self._get_base_url()}/api/pay/v1/payment-links/merchant/{merchant_ref}"
+		url = f"{self._get_base_url()}/api/pay/v1/paymentlink/ref/{merchant_ref}"
 		headers = self._headers(token)
 		req_dump = (
 			f"[PineLabs PayByLink] Status Request:\n"

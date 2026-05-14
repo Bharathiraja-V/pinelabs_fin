@@ -1,11 +1,12 @@
 [project]
 name = "pinelabs_fin"
 authors = [
-    { name = "pine", email = "pinelab12@gmail.com"}
+    { name = "Finstein", email = "praveenit2003@gmail.com" }
 ]
-description = "pine"
+description = "Pine Labs payments for ERPNext: terminal taps and hosted payment links, with auto Payment Entry on success."
 requires-python = ">=3.10"
 readme = "README.md"
+license = { file = "LICENSE" }
 dynamic = ["version"]
 dependencies = [
     # "frappe~=15.0.0" # Installed and managed by bench.

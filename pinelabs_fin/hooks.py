@@ -1,8 +1,8 @@
 app_name = "pinelabs_fin"
 app_title = "Pinelabs Fin"
-app_publisher = "pine"
-app_description = "pine"
-app_email = "pinelab12@gmail.com"
+app_publisher = "Finstein"
+app_description = "Pine Labs payments for ERPNext: terminal taps and hosted payment links, with auto Payment Entry on success."
+app_email = "bharathiraja.b@finstein.ai"
 app_license = "mit"
 
 # Apps
