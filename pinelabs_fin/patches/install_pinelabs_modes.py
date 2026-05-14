@@ -3,8 +3,7 @@
 
 """Install patch (idempotent).
 
-Adds the four PineLabs custom fields to the standard ERPNext ``Mode of Payment``
-doctype and seeds the three canonical PineLabs Mode of Payment records:
+Seeds the three canonical PineLabs Mode of Payment rows:
 
 - ``PineLabs - Card``         — terminal flow (physical device, card)
 - ``PineLabs - UPI``          — terminal flow (physical device, UPI)
@@ -12,119 +11,40 @@ doctype and seeds the three canonical PineLabs Mode of Payment records:
                                   method the customer can pick on Plural's
                                   page: card / UPI / NB / wallet)
 
+The app identifies Pine Labs modes by **name** (see
+``PINELABS_TERMINAL_MODES`` and ``PINELABS_PLURAL_MODE`` in
+``api/transaction.py``). No custom fields are added to the standard
+ERPNext ``Mode of Payment`` doctype — the integration runs against a
+zero-customisation Mode of Payment.
+
 Each row needs a default account configured per company under
 ``Mode of Payment → Accounts`` before the first payment goes through;
 the initiate-time pre-flight in ``api/transaction.py`` enforces this
 and throws a clear error before the customer is asked to pay.
-
-Existing installs that still carry the older ``PineLabs - NetBanking``
-or ``PineLabs - Wallet`` rows from earlier versions are left untouched
-(deleting them could orphan historical Payment Entries). New installs
-get only the three rows above.
 """
 
 import frappe
-from frappe.custom.doctype.custom_field.custom_field import create_custom_fields
-
-PINELABS_MOP_FIELDS = {
-	"Mode of Payment": [
-		{
-			"fieldname": "pinelabs_section",
-			"fieldtype": "Section Break",
-			"label": "Pine Labs Integration",
-			"insert_after": "enabled",
-			"collapsible": 1,
-		},
-		{
-			"fieldname": "pinelabs_enabled",
-			"fieldtype": "Check",
-			"label": "Pine Labs Enabled",
-			"description": "Tick if this Mode of Payment is offered by the Pine Labs integration.",
-			"insert_after": "pinelabs_section",
-		},
-		{
-			"fieldname": "pinelabs_flow_type",
-			"fieldtype": "Select",
-			"label": "Pine Labs Flow Type",
-			"description": "Terminal = physical POS device only. Plural = payment link only. Both = available in either flow.",
-			"options": "\nTerminal\nPlural\nBoth",
-			"depends_on": "pinelabs_enabled",
-			"insert_after": "pinelabs_enabled",
-		},
-		{
-			"fieldname": "pinelabs_terminal_code",
-			"fieldtype": "Int",
-			"label": "Pine Labs Terminal Code",
-			"description": "Pine Labs Cloud API allowed_payment_mode integer (1 = Card, 11 = UPI). Required for Terminal/Both flow.",
-			"depends_on": "eval:doc.pinelabs_flow_type==\"Terminal\" || doc.pinelabs_flow_type==\"Both\"",
-			"insert_after": "pinelabs_flow_type",
-		},
-		{
-			"fieldname": "pinelabs_plural_method",
-			"fieldtype": "Data",
-			"label": "Pine Labs Plural Method",
-			"description": "Plural API allowed_payment_methods string (CARD / UPI / NB / WALLET). Required for Plural/Both flow.",
-			"depends_on": "eval:doc.pinelabs_flow_type==\"Plural\" || doc.pinelabs_flow_type==\"Both\"",
-			"insert_after": "pinelabs_terminal_code",
-		},
-	]
-}
-
 
 SEED_MODES = [
-	{
-		"mode_of_payment": "PineLabs - Card",
-		"type": "Bank",
-		"flow_type": "Terminal",
-		"terminal_code": 1,
-		"plural_method": "",
-	},
-	{
-		"mode_of_payment": "PineLabs - UPI",
-		"type": "Bank",
-		"flow_type": "Terminal",
-		"terminal_code": 11,
-		"plural_method": "",
-	},
-	{
-		# One mode for the whole Plural flow. The customer can still pick
-		# CARD / UPI / NB / WALLET on Plural's hosted page; the actual
-		# method is captured on Pinelabs Transaction.payment_method and on
-		# the Payment Entry's reference_no via the Plural payment_id —
-		# the Mode of Payment itself stays a single ledger account.
-		"mode_of_payment": "PineLabs - Payment Link",
-		"type": "Bank",
-		"flow_type": "Plural",
-		"terminal_code": 0,
-		"plural_method": "",
-	},
+	{"mode_of_payment": "PineLabs - Card", "type": "Bank"},
+	{"mode_of_payment": "PineLabs - UPI", "type": "Bank"},
+	{"mode_of_payment": "PineLabs - Payment Link", "type": "Bank"},
 ]
 
 
 def execute():
-	create_custom_fields(PINELABS_MOP_FIELDS, ignore_validate=True, update=True)
-
 	for entry in SEED_MODES:
 		_ensure_mode(entry)
-
 	frappe.db.commit()
 
 
 def _ensure_mode(entry):
-	"""Create the Mode of Payment if missing, then sync the PineLabs fields."""
+	"""Create the Mode of Payment row if missing. Idempotent."""
 	name = entry["mode_of_payment"]
-	if not frappe.db.exists("Mode of Payment", name):
-		doc = frappe.new_doc("Mode of Payment")
-		doc.mode_of_payment = name
-		doc.type = entry["type"]
-		doc.enabled = 1
-		doc.insert(ignore_permissions=True)
-
-	# Always (re-)write the PineLabs fields so reinstalls/upgrades self-heal.
-	updates = {
-		"pinelabs_enabled": 1,
-		"pinelabs_flow_type": entry["flow_type"],
-		"pinelabs_terminal_code": entry.get("terminal_code"),
-		"pinelabs_plural_method": entry.get("plural_method"),
-	}
-	frappe.db.set_value("Mode of Payment", name, updates, update_modified=False)
+	if frappe.db.exists("Mode of Payment", name):
+		return
+	doc = frappe.new_doc("Mode of Payment")
+	doc.mode_of_payment = name
+	doc.type = entry["type"]
+	doc.enabled = 1
+	doc.insert(ignore_permissions=True)

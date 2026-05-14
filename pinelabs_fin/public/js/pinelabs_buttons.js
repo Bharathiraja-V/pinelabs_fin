@@ -217,11 +217,13 @@ frappe.pinelabs = frappe.pinelabs || {};
 					options: "Mode of Payment",
 					reqd: 1,
 					get_query() {
+						// Pine Labs Terminal modes are identified by name — no
+						// custom fields required. Keep this list in sync with
+						// PINELABS_TERMINAL_MODES in pinelabs_fin/api/transaction.py.
 						return {
 							filters: {
 								enabled: 1,
-								pinelabs_enabled: 1,
-								pinelabs_flow_type: ["in", ["Terminal", "Both"]],
+								name: ["in", ["PineLabs - Card", "PineLabs - UPI"]],
 							},
 						};
 					},

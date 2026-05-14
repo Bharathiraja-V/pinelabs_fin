@@ -51,6 +51,14 @@ class PinelabsTestPaymentPage {
 					</div>
 
 					<div class="form-row" style="margin-bottom:14px;">
+						<label style="display:block; font-weight:600; margin-bottom:4px;">${__("Customer")}</label>
+						<div class="input-customer-wrapper"></div>
+						<div class="text-muted" style="font-size:0.85em; margin-top:4px;">
+							${__("Required when create_payment_entry = 1. Maps to Payment Entry's party (party_type = Customer).")}
+						</div>
+					</div>
+
+					<div class="form-row" style="margin-bottom:14px;">
 						<label style="display:block; font-weight:600; margin-bottom:4px;">${__("Customer Email")}</label>
 						<input type="email" class="form-control input-email"
 							placeholder="${__("customer@example.com")}" />
@@ -95,6 +103,22 @@ class PinelabsTestPaymentPage {
 
 	attach_handlers() {
 		const $body = $(this.page.body);
+
+		// Render the Customer Link autocomplete inside its wrapper. Using
+		// frappe.ui.form.make_control gives the same search-as-you-type
+		// behaviour the standard form has — much friendlier than asking
+		// the operator to type the Customer doc name verbatim.
+		this.customer_field = frappe.ui.form.make_control({
+			df: {
+				fieldtype: "Link",
+				fieldname: "customer",
+				options: "Customer",
+				placeholder: __("Pick a Customer"),
+			},
+			parent: $body.find(".input-customer-wrapper")[0],
+			render_input: true,
+		});
+
 		$body.on("click", ".btn-pay-card", () =>
 			this.handle_terminal("PineLabs - Card", "CARD"),
 		);
@@ -114,6 +138,7 @@ class PinelabsTestPaymentPage {
 			amount: parseFloat($body.find(".input-amount").val()) || 0,
 			email: ($body.find(".input-email").val() || "").trim(),
 			mobile: ($body.find(".input-mobile").val() || "").trim(),
+			customer: (this.customer_field && this.customer_field.get_value()) || "",
 		};
 	}
 
@@ -154,12 +179,13 @@ class PinelabsTestPaymentPage {
 	// API call below and are rendered via show_status(text-danger).
 	// ──────────────────────────────────────────────────────────────────────
 
-	async create_record({ amount, email, mobile, label }) {
+	async create_record({ amount, email, mobile, customer, label }) {
 		const stamp = frappe.datetime.now_datetime().replace(/[: ]/g, "-");
 		const doc = await frappe.db.insert({
 			doctype: "Test Payment",
 			title: `${label} ${stamp}`,
 			amount,
+			customer,
 			customer_email: email,
 			customer_mobile: mobile,
 		});
@@ -207,6 +233,12 @@ class PinelabsTestPaymentPage {
 					reference_doctype: "Test Payment",
 					reference_name: name,
 					mode_of_payment,
+					// Opt the test-page Card / UPI buttons into PE creation
+					// on success. The server-side account-mapping pre-flight
+					// fires before contacting Pine Labs (so if the Mode of
+					// Payment's company-account isn't configured, the customer
+					// is never asked to tap).
+					create_payment_entry: 1,
 				},
 				{
 					on_settled: (status, txn) => {

@@ -44,6 +44,34 @@ ACTIVE_STATUSES = ("INITIATED", "PENDING")
 # module checks this BEFORE the customer is asked to pay.
 PE_NATIVE_DOCTYPES = ("Sales Invoice", "POS Invoice", "Payment Request")
 
+# ──────────────────────────────────────────────────────────────────────────
+# Canonical Pine Labs Mode of Payment names. The app installs and operates
+# against exactly these three rows; no custom fields on Mode of Payment are
+# required to recognise them. Renaming any of these rows will break the
+# integration — they are part of the install contract.
+# ──────────────────────────────────────────────────────────────────────────
+
+# Terminal modes — name → Pine Labs Cloud allowed_payment_mode integer.
+PINELABS_TERMINAL_MODES = {
+	"PineLabs - Card": 1,
+	"PineLabs - UPI": 11,
+}
+
+# Terminal method string (CARD / UPI on the txn) → mode name.
+PINELABS_METHOD_TO_MODE = {
+	"CARD": "PineLabs - Card",
+	"UPI": "PineLabs - UPI",
+}
+
+# Terminal mode name → method string (inverse of the map above).
+PINELABS_MODE_TO_METHOD = {v: k for k, v in PINELABS_METHOD_TO_MODE.items()}
+
+# Plural / Pay-by-Link uses a single mode covering every method the customer
+# can pick on the hosted page.
+PINELABS_PLURAL_MODE = "PineLabs - Payment Link"
+
+PINELABS_MODES = (*PINELABS_TERMINAL_MODES, PINELABS_PLURAL_MODE)
+
 
 def validate_finalization_ready(reference_doctype):
 	"""Refuse to start a payment when the app cannot finish it CLEANLY.
@@ -119,11 +147,18 @@ def create_transaction(
 	machine=None,
 	order_id=None,
 	request_payload=None,
+	create_payment_entry=None,
 ):
 	"""Insert a new Pinelabs Transaction in INITIATED state.
 
 	Caller must have already validated eligibility (docstatus, outstanding,
 	etc.) — this function only enforces structural invariants.
+
+	``create_payment_entry`` is the API caller's optional per-transaction
+	override. ``1`` / ``True`` / ``"Yes"`` → finalize will always create a PE;
+	``0`` / ``False`` / ``"No"`` → finalize will always skip PE creation
+	(falls back to mapped finalization if configured). ``None`` → use the
+	Payable Documents row's setting.
 	"""
 	if flow_type not in VALID_FLOW_TYPES:
 		frappe.throw(
@@ -144,6 +179,9 @@ def create_transaction(
 	doc.order_id = order_id
 	doc.created_at = now_datetime()
 	doc.status = "INITIATED"
+	override = normalize_create_payment_entry(create_payment_entry)
+	if override:
+		doc.create_payment_entry_override = override
 	if request_payload is not None:
 		doc.request_payload = _to_json_str(request_payload)
 
@@ -343,12 +381,15 @@ def _publish_status_update(transaction):
 
 
 def _resolve_mode_of_payment(transaction):
-	"""Find the Mode of Payment that matches this transaction's flow + method.
+	"""Return the canonical Pine Labs Mode of Payment for this transaction.
 
-	Looks up the custom fields seeded by install_pinelabs_modes.py:
+	Pine Labs modes are identified by **name**, not by custom fields. The
+	three canonical names (Card, UPI, Payment Link) are seeded by
+	``install_pinelabs_modes.py``. Renaming them in the desk breaks the
+	integration — they are part of the install contract.
 
-	- For Terminal: ``pinelabs_terminal_code`` matches the integer Pine Labs
-	  code we sent (1 = Card, 11 = UPI). Two modes exist (Card, UPI).
+	- For Terminal: payment_method "CARD" → "PineLabs - Card", "UPI" →
+	  "PineLabs - UPI".
 	- For Plural: a single ``PineLabs - Payment Link`` mode covers the whole
 	  flow regardless of what the customer ended up paying with on the
 	  hosted page. The customer's real method is still captured on
@@ -358,62 +399,63 @@ def _resolve_mode_of_payment(transaction):
 	flow = transaction.flow_type
 	method = (transaction.payment_method or "").upper()
 
-	# Map the canonical Terminal method strings to the integer code Pine Labs uses.
-	_TERMINAL_METHOD_TO_CODE = {"CARD": 1, "UPI": 11}
-
 	if flow == "Terminal":
-		filters = {
-			"pinelabs_enabled": 1,
-			"pinelabs_flow_type": ["in", ["Terminal", "Both"]],
-		}
-		if method:
-			code = _TERMINAL_METHOD_TO_CODE.get(method)
-			if code is None:
-				frappe.throw(_("Unknown terminal payment_method {0}.").format(method))
-			filters["pinelabs_terminal_code"] = code
-		rows = frappe.get_all("Mode of Payment", filters=filters, fields=["name"], limit=1)
-		if not rows:
+		name = PINELABS_METHOD_TO_MODE.get(method)
+		if not name:
+			frappe.throw(_("Unknown terminal payment_method {0}.").format(method or "?"))
+		if not frappe.db.exists("Mode of Payment", name):
 			frappe.throw(
-				_("No PineLabs Mode of Payment found for Terminal method {0}.").format(method or "?"),
+				_(
+					"Mode of Payment '{0}' is missing. Run "
+					"`bench --site <site> migrate` to seed the canonical Pine Labs modes."
+				).format(name),
 			)
-		return rows[0].name
+		return name
 
-	# Plural — a single mode covers all hosted-link payments.
+	# Plural — single mode covers all hosted-link payments.
 	return get_plural_mode_of_payment()
 
 
 def get_plural_mode_of_payment():
-	"""Return the name of the single Mode of Payment used for every Plural payment.
+	"""Return the canonical Mode of Payment used for every Plural payment.
 
 	Centralised so the initiate-time account-mapping pre-flight and the
-	finalize-time PE creation can't drift out of sync.
+	finalize-time PE creation can't drift apart.
 	"""
-	rows = frappe.get_all(
-		"Mode of Payment",
-		filters={
-			"pinelabs_enabled": 1,
-			"pinelabs_flow_type": ["in", ["Plural", "Both"]],
-		},
-		fields=["name"],
-		order_by="creation asc",
-		limit=1,
-	)
-	if not rows:
+	name = PINELABS_PLURAL_MODE
+	if not frappe.db.exists("Mode of Payment", name):
 		frappe.throw(
 			_(
-				"No PineLabs Mode of Payment is enabled for the Plural (Payment Link) "
-				"flow. Run ``bench --site &lt;site&gt; migrate`` to seed the standard "
-				"'PineLabs - Payment Link' mode, or enable a Plural-flow Mode of Payment "
-				"manually."
-			),
+				"Mode of Payment '{0}' is missing. Run "
+				"`bench --site <site> migrate` to seed it."
+			).format(name),
 		)
-	return rows[0].name
+	return name
 
 
-def will_create_payment_entry(reference_doctype):
+def normalize_create_payment_entry(value):
+	"""Coerce an API ``create_payment_entry`` argument into ``"Yes"`` / ``"No"`` / ``None``.
+
+	The wire form accepts any of: ``None`` (or unset), ``0``, ``1``, ``"0"``,
+	``"1"``, ``True``, ``False``, ``"Yes"``, ``"No"``. Anything else falls
+	through to ``None`` (= "inherit from Payable Documents config").
+	"""
+	if value is None or value == "":
+		return None
+	if value in (1, "1", True, "Yes", "yes", "y", "Y", "true", "True"):
+		return "Yes"
+	if value in (0, "0", False, "No", "no", "n", "N", "false", "False"):
+		return "No"
+	return None
+
+
+def will_create_payment_entry(reference_doctype, override=None):
 	"""Return True iff the configured finalization path will produce a Payment Entry.
 
-	Three "no PE" paths exist (see ``validate_finalization_ready``):
+	``override`` is the API caller's explicit per-call decision (already
+	normalized to ``"Yes"`` / ``"No"`` / ``None`` via
+	``normalize_create_payment_entry``). When set, it wins over any
+	Payable Documents row. When ``None``, the decision falls back to:
 
 	1. The reference_doctype isn't PE-native AND has no Payable Documents
 	   row (permissive — custom-button flow, source doc is not auto-finalized).
@@ -425,6 +467,11 @@ def will_create_payment_entry(reference_doctype):
 	The account-mapping pre-flight only matters when a PE is going to be
 	posted, so it should be gated on this.
 	"""
+	if override == "Yes":
+		return True
+	if override == "No":
+		return False
+
 	config = _get_payable_config(reference_doctype)
 	if config and not cint(config.get("finalize_via_payment_entry", 1)):
 		return False  # mapped-field finalization
@@ -437,7 +484,7 @@ def will_create_payment_entry(reference_doctype):
 	return True
 
 
-def assert_mode_has_account_mapped(mode_of_payment, company, *, reference_doctype=None):
+def assert_mode_has_account_mapped(mode_of_payment, company, *, reference_doctype=None, reference_name=None, create_payment_entry=None):
 	"""Throw if ``Mode of Payment → Accounts`` has no row for this company.
 
 	ERPNext's ``get_payment_entry`` won't be able to post the credit leg of
@@ -451,16 +498,34 @@ def assert_mode_has_account_mapped(mode_of_payment, company, *, reference_doctyp
 	create a Payment Entry (mapped-field finalization, or the permissive
 	custom-button path on a non-PE-native doctype). In those cases the
 	Mode of Payment is informational only — no account is posted to.
+
+	When the caller explicitly opted in to PE creation (``create_payment_entry
+	= 1``) on a custom doctype that has no ``company`` field, the company is
+	resolved via ERPNext's defaults — mirroring the resolution chain in
+	``_build_custom_doctype_pe`` so this pre-flight catches missing account
+	mappings the finalize-time builder would also reject.
 	"""
+	override = normalize_create_payment_entry(create_payment_entry)
+
+	if reference_doctype is not None and not will_create_payment_entry(
+		reference_doctype, override=override
+	):
+		# Mapped-field or permissive path — no PE will be posted, so the
+		# Mode of Payment's account doesn't need to be configured.
+		return
+
+	if not company and override == "Yes":
+		# Custom doctype with no company field — match the finalize-time
+		# builder's fallback chain so we catch the same misconfig now.
+		company = (
+			frappe.defaults.get_user_default("company")
+			or frappe.defaults.get_global_default("company")
+		)
+
 	if not (mode_of_payment and company):
 		# Caller didn't provide enough context to check — better to skip
 		# than to throw a misleading error. The finalize-time path will
 		# still surface any real misconfig.
-		return
-
-	if reference_doctype is not None and not will_create_payment_entry(reference_doctype):
-		# Mapped-field or permissive path — no PE will be posted, so the
-		# Mode of Payment's account doesn't need to be configured.
 		return
 
 	account = frappe.db.get_value(
@@ -476,6 +541,30 @@ def assert_mode_has_account_mapped(mode_of_payment, company, *, reference_doctyp
 				"with Company = {1} and a Default Account before taking this payment."
 			).format(mode_of_payment, company),
 		)
+
+	# When override=Yes on a non-PE-native doctype, also verify a Customer
+	# party can be resolved — ERPNext's Payment Entry rejects "Receive" PEs
+	# without one. Catching this here prevents the customer from getting
+	# stuck at "Waiting for terminal" only for the PE creation to fail with
+	# "Party Type is mandatory" after they've paid.
+	if (
+		override == "Yes"
+		and reference_doctype
+		and reference_doctype not in PE_NATIVE_DOCTYPES
+	):
+		source_doc = None
+		if reference_name and frappe.db.exists(reference_doctype, reference_name):
+			source_doc = frappe.get_doc(reference_doctype, reference_name)
+		party = _resolve_pe_party_for_custom_doctype(source_doc)
+		if not party:
+			frappe.throw(
+				_(
+					"Cannot create a Payment Entry for {0}: no Customer can be "
+					"resolved. Add a 'customer' Link field to {0}, or set the "
+					"Default Customer in Global Defaults, or call the API with "
+					"create_payment_entry=0."
+				).format(reference_doctype),
+			)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -495,12 +584,24 @@ def _create_payment_entry_idempotent(transaction):
 	if transaction.payment_entry:
 		return transaction.payment_entry
 
-	# Per-doctype config decides PE vs mapped-field finalization.
+	# Per-doctype config decides PE vs mapped-field finalization — unless the
+	# Pinelabs Transaction has an explicit override stored from initiate time
+	# (set by the API caller passing create_payment_entry=0/1).
 	config = _get_payable_config(transaction.reference_doctype)
-	finalize_via_pe = cint((config or {}).get("finalize_via_payment_entry", 1))
+	override = (getattr(transaction, "create_payment_entry_override", None) or "").strip()
+	if override == "Yes":
+		finalize_via_pe = 1
+	elif override == "No":
+		finalize_via_pe = 0
+	else:
+		finalize_via_pe = cint((config or {}).get("finalize_via_payment_entry", 1))
 
 	if not finalize_via_pe:
-		_apply_mapped_finalization(transaction, config)
+		# Either Payable Documents config or the API caller said "no PE".
+		# Fall back to mapped finalization if it's configured; otherwise
+		# leave the source doc untouched.
+		if config:
+			_apply_mapped_finalization(transaction, config)
 		return None
 
 	# Rule 2: PE with same reference_no exists → reuse it.
@@ -522,16 +623,22 @@ def _create_payment_entry_idempotent(transaction):
 	from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
 
 	if transaction.reference_doctype not in PE_NATIVE_DOCTYPES:
-		# Two sub-cases here:
-		# 1. No Payable Documents row → permissive path. The caller chose
-		#    to skip configuration; mark the Pinelabs Transaction as
-		#    SUCCESS without touching the source doc. They can react to
-		#    the pinelabs_txn_update realtime event if they want their
-		#    source doc updated.
-		# 2. Row exists with finalize_via_payment_entry = 1 (misconfig).
-		#    validate_finalization_ready should have caught this at click
-		#    time. Reaching here means a code path bypassed it (e.g. a
-		#    direct test fixture). Throw with the actionable message.
+		# Three sub-cases:
+		# 1. Explicit ``create_payment_entry = 1`` from the API caller →
+		#    build a standalone PE since ERPNext's get_payment_entry only
+		#    supports SI/POSI/PR. Lenient on company / party resolution so
+		#    arbitrary custom doctypes can work.
+		# 2. No Payable Documents row and no override → permissive path.
+		#    The caller chose to skip configuration; mark the Pinelabs
+		#    Transaction as SUCCESS without touching the source doc. They
+		#    can react to the pinelabs_txn_update realtime event if they
+		#    want their source doc updated.
+		# 3. Row exists with finalize_via_payment_entry = 1 and no override
+		#    (misconfig). validate_finalization_ready should have caught
+		#    this at click time. Reaching here means a code path bypassed
+		#    it. Throw with the actionable message.
+		if override == "Yes":
+			return _build_custom_doctype_pe(transaction)
 		if not config:
 			return None
 		frappe.throw(
@@ -589,6 +696,164 @@ def _create_payment_entry_idempotent(transaction):
 	# Bypass flag for conflict_guard.refuse_if_pinelabs_active — without
 	# this our own PE insertion would trip the validate hook because
 	# THIS Pinelabs Transaction is still in PENDING at this exact moment.
+	pe.flags.pinelabs_internal_pe = True
+	pe.flags.ignore_permissions = True
+	pe.insert()
+	pe.submit()
+	return pe.name
+
+
+def _resolve_pe_party_for_custom_doctype(source_doc):
+	"""Resolve a Customer party for a non-PE-native source doctype.
+
+	Used by both the initiate-time pre-flight (so the misconfig is caught
+	before the gateway is contacted) and the finalize-time builder (so a
+	PE creation that does reach finalize doesn't crash on "Party Type is
+	mandatory"). Keeping a single resolution chain prevents the two paths
+	from disagreeing.
+
+	Resolution order:
+	  - ``source_doc.customer`` (most custom doctypes use this name)
+	  - ``source_doc.party`` (generic)
+	  - user's default Customer
+	  - global default Customer
+
+	Returns the Customer name, or None when nothing resolves.
+	"""
+	if source_doc is not None:
+		party = getattr(source_doc, "customer", None) or getattr(source_doc, "party", None)
+		if party:
+			return party
+	return (
+		frappe.defaults.get_user_default("customer")
+		or frappe.defaults.get_global_default("customer")
+	)
+
+
+def _build_custom_doctype_pe(transaction):
+	"""Build a Payment Entry for a non-PE-native source doctype.
+
+	Used only when the API caller explicitly opted in via
+	``create_payment_entry = 1``. ERPNext's ``get_payment_entry`` helper
+	only knows how to build PEs against Sales Invoice / POS Invoice /
+	Payment Request; for any other doctype this function constructs the
+	PE manually with sensible fallbacks for the fields the helper would
+	have filled in.
+
+	Resolution order:
+
+	- ``company``: source doc field → user default → global default.
+	- ``party``: source_doc.customer / source_doc.party → no party.
+	- ``paid_to`` (cash/bank): Mode of Payment Account row for this company
+	  (already enforced by the initiate-time pre-flight when override = Yes).
+	- ``paid_from``: company's default receivable (when party set) →
+	  any Receivable account → Temporary account → any Income account.
+
+	The PE produced has no entry in ``references`` (the source doctype
+	may not be allowed there); identification flows through
+	``reference_no = transaction.payment_id`` and the back-link on the
+	Pinelabs Transaction record.
+	"""
+	source = frappe.get_doc(transaction.reference_doctype, transaction.reference_name)
+
+	company = (
+		getattr(source, "company", None)
+		or frappe.defaults.get_user_default("company")
+		or frappe.defaults.get_global_default("company")
+	)
+	if not company:
+		frappe.throw(
+			_(
+				"Cannot create a Payment Entry for {0} {1}: no Company resolved. "
+				"Either add a 'company' field to {0}, set the Default Company in "
+				"Global Defaults, or call the API with create_payment_entry=0."
+			).format(transaction.reference_doctype, transaction.reference_name),
+		)
+
+	mode_account = frappe.db.get_value(
+		"Mode of Payment Account",
+		{"parent": transaction.mode_of_payment, "company": company},
+		"default_account",
+	)
+	if not mode_account:
+		frappe.throw(
+			_(
+				"Mode of Payment {0} has no default account configured for "
+				"Company {1}. Open Mode of Payment → {0} → Accounts and add a "
+				"row before retrying."
+			).format(transaction.mode_of_payment, company),
+		)
+
+	party = _resolve_pe_party_for_custom_doctype(source)
+	if not party:
+		frappe.throw(
+			_(
+				"Cannot create a Payment Entry for {0} {1}: no Customer resolved. "
+				"ERPNext's Payment Entry requires a Customer / party_type for "
+				"'Receive' payments. Add a 'customer' Link field to {0}, or set "
+				"the Default Customer in Global Defaults, or call the API with "
+				"create_payment_entry=0."
+			).format(transaction.reference_doctype, transaction.reference_name),
+		)
+
+	paid_from = None
+	if party:
+		paid_from = frappe.db.get_value("Company", company, "default_receivable_account")
+		if not paid_from:
+			paid_from = frappe.db.get_value(
+				"Account",
+				{"company": company, "account_type": "Receivable", "is_group": 0},
+				"name",
+			)
+
+	if not paid_from:
+		paid_from = (
+			frappe.db.get_value(
+				"Account",
+				{"company": company, "account_type": "Temporary", "is_group": 0},
+				"name",
+			)
+			or frappe.db.get_value(
+				"Account",
+				{"company": company, "root_type": "Income", "is_group": 0},
+				"name",
+			)
+		)
+
+	if not paid_from:
+		frappe.throw(
+			_(
+				"Could not resolve a 'Paid From' account for Company {0}. Configure "
+				"a Default Receivable Account on the Company, or add a Customer "
+				"link to {1}, or call the API with create_payment_entry=0."
+			).format(company, transaction.reference_doctype),
+		)
+
+	pe = frappe.new_doc("Payment Entry")
+	pe.payment_type = "Receive"
+	pe.company = company
+	pe.posting_date = frappe.utils.nowdate()
+	pe.mode_of_payment = transaction.mode_of_payment
+	pe.paid_amount = flt(transaction.amount)
+	pe.received_amount = flt(transaction.amount)
+	pe.source_exchange_rate = 1
+	pe.target_exchange_rate = 1
+	pe.paid_from = paid_from
+	pe.paid_to = mode_account
+	pe.reference_no = transaction.payment_id
+	pe.reference_date = (transaction.completed_at or now_datetime())
+	pe.remarks = (
+		f"Pine Labs {transaction.flow_type} payment "
+		f"({transaction.payment_method or 'unknown method'}) "
+		f"for {transaction.reference_doctype} {transaction.reference_name}. "
+		f"Pinelabs Transaction: {transaction.name}."
+	)
+	if party:
+		pe.party_type = "Customer"
+		pe.party = party
+
+	# Same bypass flag as the PE-native path so conflict_guard doesn't block
+	# our own insertion while THIS Pinelabs Transaction is still PENDING.
 	pe.flags.pinelabs_internal_pe = True
 	pe.flags.ignore_permissions = True
 	pe.insert()

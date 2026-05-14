@@ -35,11 +35,22 @@ def initiate_terminal_payment(
 	reference_name: str,
 	mode_of_payment: str,
 	amount: float | None = None,
+	create_payment_entry: int | None = None,
 ) -> dict:
 	"""Start a terminal payment.
 
 	Returns {success, transaction_name, response_code, message}.
 	The frontend should then poll check_terminal_status until terminal.
+
+	``create_payment_entry`` (optional): per-call override of the Payable
+	Documents row's Create Payment Entry setting.
+
+	- ``1`` → always create a PE on success (and run the account-mapping
+	  pre-flight now)
+	- ``0`` → never create a PE; fall back to mapped finalization if the
+	  Payable Documents row configures it, otherwise leave the source doc
+	  untouched
+	- omitted / ``None`` → use the row's setting (current behaviour)
 	"""
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
@@ -60,6 +71,8 @@ def initiate_terminal_payment(
 		mode_of_payment,
 		getattr(source_doc, "company", None),
 		reference_doctype=reference_doctype,
+		reference_name=reference_name,
+		create_payment_entry=create_payment_entry,
 	)
 	resolved_amount = flt(amount) if amount else _amount_for(source_doc)
 	if resolved_amount <= 0:
@@ -98,6 +111,7 @@ def initiate_terminal_payment(
 		amount=resolved_amount,
 		payment_method=terminal_method,
 		machine=machine.machine_name,
+		create_payment_entry=create_payment_entry,
 	)
 
 	client = get_pinelabs_client(machine_name=machine.machine_name)
@@ -142,16 +156,29 @@ def initiate_terminal_payment(
 
 
 @frappe.whitelist()
-def check_terminal_status(transaction_name: str) -> dict:
+def check_terminal_status(transaction_name: str, create_payment_entry: int | None = None) -> dict:
 	"""Poll Pine Labs for the latest terminal status of a transaction.
 
 	Frontend calls this every ~3s while its modal is open.
 	Returns {success, status, response_code, message}.
+
+	``create_payment_entry`` (optional): late override of the same flag set
+	at initiate time. ``1`` / ``0`` updates the stored decision on the
+	Pinelabs Transaction so the finalize path uses it. Omit to leave the
+	stored value (or the Payable Documents config) untouched.
 	"""
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
 
 	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	# Late override — caller can flip the create-PE decision before the
+	# poll triggers mark_success. Stored on the row so the cron/webhook
+	# paths also honor the latest value.
+	override = txn_service.normalize_create_payment_entry(create_payment_entry)
+	if override and txn.create_payment_entry_override != override and txn.status in ("INITIATED", "PENDING"):
+		txn.create_payment_entry_override = override
+		txn.flags.pinelabs_internal_transition = True
+		txn.save(ignore_permissions=True)
 	if txn.flow_type != "Terminal":
 		frappe.throw(_("Transaction {0} is not a Terminal transaction.").format(transaction_name))
 	if txn.status in ("SUCCESS", "FAILED", "CANCELLED"):
@@ -317,32 +344,39 @@ def _amount_for(source_doc):
 
 
 def _load_pinelabs_mode(mode_of_payment, expected_flows):
+	"""Validate that ``mode_of_payment`` is a Pine Labs Terminal mode.
+
+	Pine Labs modes are identified by name (see ``PINELABS_TERMINAL_MODES``
+	in transaction.py) — no custom-field lookup is needed. Returns a small
+	dict the rest of the file can read like the legacy ``mode_doc``:
+	``{"pinelabs_terminal_code": <int>}``.
+
+	``expected_flows`` is kept for signature compatibility with the legacy
+	flow-type check; this function only ever runs against the Terminal
+	dialog, so the only valid input is ``("Terminal", "Both")``.
+	"""
+	from pinelabs_fin.api.transaction import PINELABS_TERMINAL_MODES
+
 	if not mode_of_payment:
 		frappe.throw(_("Mode of Payment is required."))
 	if not frappe.db.exists("Mode of Payment", mode_of_payment):
 		frappe.throw(_("Mode of Payment {0} does not exist.").format(mode_of_payment))
 
-	mode_doc = frappe.db.get_value(
-		"Mode of Payment",
-		mode_of_payment,
-		["pinelabs_enabled", "pinelabs_flow_type", "pinelabs_terminal_code", "pinelabs_plural_method"],
-		as_dict=True,
-	) or {}
-	if not cint(mode_doc.get("pinelabs_enabled")):
-		frappe.throw(_("Mode of Payment {0} is not Pine Labs enabled.").format(mode_of_payment))
-	if mode_doc.get("pinelabs_flow_type") not in expected_flows:
+	terminal_code = PINELABS_TERMINAL_MODES.get(mode_of_payment)
+	if terminal_code is None:
 		frappe.throw(
-			_("Mode of Payment {0} cannot be used for this button (flow_type={1}).").format(
-				mode_of_payment, mode_doc.get("pinelabs_flow_type")
-			),
+			_(
+				"Mode of Payment {0} is not a Pine Labs Terminal mode. "
+				"Pick one of: {1}."
+			).format(mode_of_payment, ", ".join(PINELABS_TERMINAL_MODES.keys())),
 		)
-	return mode_doc
+	return {"pinelabs_terminal_code": terminal_code}
 
 
 def _terminal_method_label(mode_doc):
 	"""Map terminal_code → CARD / UPI string used for payment_method."""
 	code = cint(mode_doc.get("pinelabs_terminal_code"))
-	return {1: "CARD", 11: "UPI"}.get(code, mode_doc.get("pinelabs_plural_method") or "")
+	return {1: "CARD", 11: "UPI"}.get(code, "")
 
 
 def _shape(*, success, txn, response_code, message):

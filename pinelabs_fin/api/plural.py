@@ -38,6 +38,7 @@ def initiate_payment_link(
 	expiry_minutes: int | None = None,
 	customer_email: str | None = None,
 	customer_mobile: str | None = None,
+	create_payment_entry: int | None = None,
 ) -> dict:
 	"""Single entry point for the Pay-by-Link flow.
 
@@ -50,6 +51,12 @@ def initiate_payment_link(
 	  - pass both       → no resolver lookup is consulted for either
 	  - pass one        → resolver still fills the other (if it can)
 	  - pass neither    → full legacy behaviour (resolver only)
+
+	``create_payment_entry`` (optional, ``0`` / ``1``): per-call override of
+	the Payable Documents row's Create Payment Entry setting. ``1`` forces
+	PE creation on success (and runs the account-mapping pre-flight now);
+	``0`` skips PE creation entirely (mapped finalization is used if
+	configured). Omit to use the configured default.
 
 	Returns:
 	  {success, transaction_name, payment_link_url, payment_link_id, message}
@@ -76,6 +83,8 @@ def initiate_payment_link(
 		txn_service.get_plural_mode_of_payment(),
 		getattr(source_doc, "company", None),
 		reference_doctype=reference_doctype,
+		reference_name=reference_name,
+		create_payment_entry=create_payment_entry,
 	)
 	amount = _amount_for(source_doc)
 	if amount <= 0:
@@ -125,6 +134,7 @@ def initiate_payment_link(
 		customer=customer,
 		flow=flow,
 		expiry_minutes=expiry,
+		create_payment_entry=create_payment_entry,
 	)
 
 	print(f"[PineLabs PayByLink] Initiate Result: {result}")
@@ -221,7 +231,7 @@ def reconcile_pending_plural_payments() -> None:
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _initiate_payment_link(*, source_doc, amount, customer, flow, expiry_minutes):
+def _initiate_payment_link(*, source_doc, amount, customer, flow, expiry_minutes, create_payment_entry=None):
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.plural_client import get_plural_client
 
@@ -247,6 +257,7 @@ def _initiate_payment_link(*, source_doc, amount, customer, flow, expiry_minutes
 		amount=amount,
 		payment_method=method_label,
 		request_payload=payload,
+		create_payment_entry=create_payment_entry,
 	)
 
 	client = get_plural_client()

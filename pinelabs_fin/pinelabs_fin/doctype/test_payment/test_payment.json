@@ -9,6 +9,7 @@
  "field_order": [
   "details_section",
   "title",
+  "customer",
   "amount",
   "column_break_details",
   "customer_email",
@@ -23,6 +24,7 @@
  "fields": [
   {"fieldname": "details_section", "fieldtype": "Section Break", "label": "Details"},
   {"description": "Short label for this test payment record.", "fieldname": "title", "fieldtype": "Data", "in_list_view": 1, "label": "Title", "reqd": 1},
+  {"description": "Maps directly to Payment Entry's party (party_type = Customer). Required when calling the API with create_payment_entry=1.", "fieldname": "customer", "fieldtype": "Link", "in_list_view": 1, "label": "Customer", "options": "Customer"},
   {"fieldname": "amount", "fieldtype": "Currency", "in_list_view": 1, "label": "Amount", "reqd": 1},
   {"fieldname": "column_break_details", "fieldtype": "Column Break"},
   {"description": "Used by Send Payment Link to deliver the link via email.", "fieldname": "customer_email", "fieldtype": "Data", "in_list_view": 1, "label": "Customer Email", "options": "Email"},

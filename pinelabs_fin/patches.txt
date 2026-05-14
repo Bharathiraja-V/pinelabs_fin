@@ -7,3 +7,4 @@
 pinelabs_fin.patches.install_pinelabs_modes
 pinelabs_fin.patches.migrate_machine_warehouse_to_mapping
 pinelabs_fin.patches.redesign_plural_settings_fields
+pinelabs_fin.patches.remove_pinelabs_mop_custom_fields
