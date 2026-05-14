@@ -273,7 +273,7 @@ def mark_failed(transaction, *, error_message=None, response_payload=None):
 	transaction.status = "FAILED"
 	transaction.completed_at = now_datetime()
 	if error_message:
-		transaction.error_message = error_message[:1000]
+		transaction.error_message = _truncate_with_ellipsis(error_message, 1000)
 	if response_payload is not None:
 		transaction.response_payload = _to_json_str(response_payload)
 	transaction.flags.pinelabs_internal_transition = True
@@ -295,7 +295,7 @@ def mark_cancelled(transaction, *, reason=None):
 	transaction.status = "CANCELLED"
 	transaction.completed_at = now_datetime()
 	if reason:
-		transaction.error_message = (reason or "")[:1000]
+		transaction.error_message = _truncate_with_ellipsis(reason, 1000)
 	transaction.flags.pinelabs_internal_transition = True
 	transaction.save(ignore_permissions=True)
 	_publish_status_update(transaction)
@@ -346,38 +346,136 @@ def _resolve_mode_of_payment(transaction):
 	"""Find the Mode of Payment that matches this transaction's flow + method.
 
 	Looks up the custom fields seeded by install_pinelabs_modes.py:
-	- pinelabs_enabled = 1
-	- pinelabs_flow_type matches (or "Both")
-	- For Terminal: pinelabs_terminal_code matches the integer code we sent
-	- For Plural: pinelabs_plural_method matches CARD/UPI/NB/WALLET
+
+	- For Terminal: ``pinelabs_terminal_code`` matches the integer Pine Labs
+	  code we sent (1 = Card, 11 = UPI). Two modes exist (Card, UPI).
+	- For Plural: a single ``PineLabs - Payment Link`` mode covers the whole
+	  flow regardless of what the customer ended up paying with on the
+	  hosted page. The customer's real method is still captured on
+	  ``Pinelabs Transaction.payment_method`` and on the resulting
+	  Payment Entry's ``reference_no`` (= Plural ``payment_id``).
 	"""
 	flow = transaction.flow_type
 	method = (transaction.payment_method or "").upper()
 
-	filters = {"pinelabs_enabled": 1}
+	# Map the canonical Terminal method strings to the integer code Pine Labs uses.
+	_TERMINAL_METHOD_TO_CODE = {"CARD": 1, "UPI": 11}
 
 	if flow == "Terminal":
-		# Terminal already knows its method up-front; payment_method is "CARD" or "UPI".
-		filters["pinelabs_flow_type"] = ["in", ["Terminal", "Both"]]
+		filters = {
+			"pinelabs_enabled": 1,
+			"pinelabs_flow_type": ["in", ["Terminal", "Both"]],
+		}
 		if method:
-			filters["pinelabs_plural_method"] = method
-	else:
-		# Plural — payment_method comes back from the webhook.
-		filters["pinelabs_flow_type"] = ["in", ["Plural", "Both"]]
-		if method:
-			filters["pinelabs_plural_method"] = method
+			code = _TERMINAL_METHOD_TO_CODE.get(method)
+			if code is None:
+				frappe.throw(_("Unknown terminal payment_method {0}.").format(method))
+			filters["pinelabs_terminal_code"] = code
+		rows = frappe.get_all("Mode of Payment", filters=filters, fields=["name"], limit=1)
+		if not rows:
+			frappe.throw(
+				_("No PineLabs Mode of Payment found for Terminal method {0}.").format(method or "?"),
+			)
+		return rows[0].name
 
+	# Plural — a single mode covers all hosted-link payments.
+	return get_plural_mode_of_payment()
+
+
+def get_plural_mode_of_payment():
+	"""Return the name of the single Mode of Payment used for every Plural payment.
+
+	Centralised so the initiate-time account-mapping pre-flight and the
+	finalize-time PE creation can't drift out of sync.
+	"""
 	rows = frappe.get_all(
 		"Mode of Payment",
-		filters=filters,
+		filters={
+			"pinelabs_enabled": 1,
+			"pinelabs_flow_type": ["in", ["Plural", "Both"]],
+		},
 		fields=["name"],
+		order_by="creation asc",
 		limit=1,
 	)
 	if not rows:
 		frappe.throw(
-			_("No PineLabs Mode of Payment found for flow={0}, method={1}.").format(flow, method or "?"),
+			_(
+				"No PineLabs Mode of Payment is enabled for the Plural (Payment Link) "
+				"flow. Run ``bench --site &lt;site&gt; migrate`` to seed the standard "
+				"'PineLabs - Payment Link' mode, or enable a Plural-flow Mode of Payment "
+				"manually."
+			),
 		)
 	return rows[0].name
+
+
+def will_create_payment_entry(reference_doctype):
+	"""Return True iff the configured finalization path will produce a Payment Entry.
+
+	Three "no PE" paths exist (see ``validate_finalization_ready``):
+
+	1. The reference_doctype isn't PE-native AND has no Payable Documents
+	   row (permissive — custom-button flow, source doc is not auto-finalized).
+	2. The Payable Documents row has ``finalize_via_payment_entry = 0``
+	   (mapped-field finalization writes a status field instead).
+	3. (Implicitly) misconfigured rows — ``validate_finalization_ready``
+	   throws on those before we ever get here.
+
+	The account-mapping pre-flight only matters when a PE is going to be
+	posted, so it should be gated on this.
+	"""
+	config = _get_payable_config(reference_doctype)
+	if config and not cint(config.get("finalize_via_payment_entry", 1)):
+		return False  # mapped-field finalization
+	if reference_doctype in PE_NATIVE_DOCTYPES:
+		return True
+	if not config:
+		return False  # permissive — custom button + no PE
+	# Non-PE-native doctype with finalize_via_pe=1 — validate_finalization_ready
+	# refuses this combination, so we never actually finalize via PE here.
+	return True
+
+
+def assert_mode_has_account_mapped(mode_of_payment, company, *, reference_doctype=None):
+	"""Throw if ``Mode of Payment → Accounts`` has no row for this company.
+
+	ERPNext's ``get_payment_entry`` won't be able to post the credit leg of
+	the PE without the account mapping, but the failure surfaces deep inside
+	``mark_success`` — long after the customer has paid. Call this BEFORE
+	the request hits Pine Labs / Plural so the operator gets a clean,
+	actionable error and the customer is never charged for a payment we
+	can't finalize.
+
+	The check is skipped when the configured finalization path will NOT
+	create a Payment Entry (mapped-field finalization, or the permissive
+	custom-button path on a non-PE-native doctype). In those cases the
+	Mode of Payment is informational only — no account is posted to.
+	"""
+	if not (mode_of_payment and company):
+		# Caller didn't provide enough context to check — better to skip
+		# than to throw a misleading error. The finalize-time path will
+		# still surface any real misconfig.
+		return
+
+	if reference_doctype is not None and not will_create_payment_entry(reference_doctype):
+		# Mapped-field or permissive path — no PE will be posted, so the
+		# Mode of Payment's account doesn't need to be configured.
+		return
+
+	account = frappe.db.get_value(
+		"Mode of Payment Account",
+		{"parent": mode_of_payment, "company": company},
+		"default_account",
+	)
+	if not account:
+		frappe.throw(
+			_(
+				"Mode of Payment <b>{0}</b> has no default account configured for "
+				"<b>{1}</b>. Open Mode of Payment → {0} → Accounts and add a row "
+				"with Company = {1} and a Default Account before taking this payment."
+			).format(mode_of_payment, company),
+		)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -406,9 +504,15 @@ def _create_payment_entry_idempotent(transaction):
 		return None
 
 	# Rule 2: PE with same reference_no exists → reuse it.
+	# Restrict to non-cancelled PEs (docstatus 0 or 1) so a previously
+	# cancelled PE pointing at the same Pine Labs payment doesn't block
+	# a legitimate retry.
 	existing = frappe.db.get_value(
 		"Payment Entry",
-		{"reference_no": transaction.payment_id},
+		{
+			"reference_no": transaction.payment_id,
+			"docstatus": ["<", 2],
+		},
 		"name",
 	)
 	if existing:
@@ -463,7 +567,7 @@ def _create_payment_entry_idempotent(transaction):
 			f"Pine Labs charge or cancel the conflicting Payment Entry and re-run "
 			f"Refresh Status on this transaction."
 		)
-		transaction.error_message = conflict_msg[:1000]
+		transaction.error_message = _truncate_with_ellipsis(conflict_msg, 1000)
 		frappe.log_error(conflict_msg, "Pinelabs PE conflict")
 		return None
 
@@ -599,3 +703,19 @@ def _to_json_str(value):
 		return json.dumps(value, indent=2, default=str)
 	except Exception:
 		return str(value)
+
+
+def _truncate_with_ellipsis(text, max_length):
+	"""Truncate text to max_length, appending an ellipsis when something was cut.
+
+	Without the marker, an operator reading a 1000-char error_message has no
+	way to know the gateway actually returned more — `response_payload` has
+	the full body, but only if they know to look there.
+	"""
+	if text is None:
+		return ""
+	text = str(text)
+	if len(text) <= max_length:
+		return text
+	# Leave 1 char of headroom for the ellipsis.
+	return text[: max_length - 1] + "…"

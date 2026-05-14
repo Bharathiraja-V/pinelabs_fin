@@ -110,7 +110,11 @@ def handle_webhook():
 			return _respond(200, "Recorded failure", success=True)
 
 		# Unknown event — store payload for debugging, leave status alone.
+		# Lock the row first so concurrent unknown-event deliveries can't
+		# stomp each other's response_payload (cron + webhook + multiple
+		# webhook retries all race on the same Pinelabs Transaction row).
 		_log_decision(f"unknown event_type={event_type} status={payload.get('status')}", txn_name)
+		txn = txn_service._lock_and_reload(txn)
 		txn.response_payload = json.dumps(data, indent=2, default=str)
 		txn.flags.pinelabs_internal_transition = True
 		txn.save(ignore_permissions=True)

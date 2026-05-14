@@ -19,7 +19,14 @@ State flow:
 
 import frappe
 from frappe import _
-from frappe.utils import cint, flt
+from frappe.utils import cint, flt, get_datetime, time_diff_in_seconds
+
+# When Pine Labs returns a non-standard ResponseCode for a terminal poll,
+# the txn would otherwise sit PENDING forever and the cron would loop on it.
+# After this many minutes with no movement, mark the txn FAILED so the
+# operator sees a terminal state. Overrideable per-machine via
+# Pinelabs Machine Config.auto_cancel_duration_in_minutes.
+_DEFAULT_AUTO_CANCEL_MINUTES = 5
 
 
 @frappe.whitelist()
@@ -45,6 +52,15 @@ def initiate_terminal_payment(
 	# this doctype, the customer should never be asked to tap their card.
 	txn_service.validate_finalization_ready(reference_doctype)
 	mode_doc = _load_pinelabs_mode(mode_of_payment, expected_flows=("Terminal", "Both"))
+	# The Mode of Payment must have a default account for the source doc's
+	# company — but only if the configured finalization path actually creates
+	# a Payment Entry. Mapped-field finalization (custom doctypes) and the
+	# permissive no-config path don't post to a ledger account.
+	txn_service.assert_mode_has_account_mapped(
+		mode_of_payment,
+		getattr(source_doc, "company", None),
+		reference_doctype=reference_doctype,
+	)
 	resolved_amount = flt(amount) if amount else _amount_for(source_doc)
 	if resolved_amount <= 0:
 		frappe.throw(_("No outstanding amount on {0} {1}.").format(reference_doctype, reference_name))
@@ -163,6 +179,12 @@ def check_terminal_status(transaction_name: str) -> dict:
 
 	if response_code in (1001, "1001"):
 		# Still waiting on the terminal — refresh response_payload for visibility.
+		# Lock the row so the foreground 3s poll and the 1-min cron can't stomp
+		# each other's response_payload writes. If another worker already finalized
+		# us in the meantime, bail out and report the new state.
+		txn = txn_service._lock_and_reload(txn)
+		if txn.status in ("SUCCESS", "FAILED", "CANCELLED"):
+			return {"success": True, "status": txn.status, "response_code": response_code, "message": "already finalized"}
 		txn.response_payload = frappe.as_json(response_data, indent=2)
 		txn.flags.pinelabs_internal_transition = True
 		txn.save(ignore_permissions=True)
@@ -173,12 +195,37 @@ def check_terminal_status(transaction_name: str) -> dict:
 		txn_service.mark_failed(txn, error_message=message, response_payload=response_data)
 		return {"success": True, "status": "FAILED", "response_code": response_code, "message": message}
 
-	# Unknown response_code — surface as-is, leave status alone.
+	# Unknown response_code — Pine Labs returned something outside the documented
+	# set. Capture it on the txn for visibility AND age-out to FAILED so the row
+	# doesn't sit PENDING forever (and the cron doesn't loop on it forever).
+	unknown_msg = response_data.get("ResponseMessage") or "Unknown response code"
+	txn = txn_service._lock_and_reload(txn)
+	if txn.status in ("SUCCESS", "FAILED", "CANCELLED"):
+		return {"success": True, "status": txn.status, "response_code": response_code, "message": "already finalized"}
+	txn.response_payload = frappe.as_json(response_data, indent=2)
+	txn.error_message = txn_service._truncate_with_ellipsis(
+		f"Unknown ResponseCode {response_code}: {unknown_msg}", 1000
+	)
+	txn.flags.pinelabs_internal_transition = True
+	txn.save(ignore_permissions=True)
+
+	age_minutes = _txn_age_minutes(txn)
+	cutoff = _auto_cancel_minutes(txn)
+	if age_minutes >= cutoff:
+		txn_service.mark_failed(
+			txn,
+			error_message=(
+				f"No terminal state after {cutoff} min. Last ResponseCode={response_code}: {unknown_msg}"
+			),
+			response_payload=response_data,
+		)
+		return {"success": True, "status": "FAILED", "response_code": response_code, "message": "Aged out"}
+
 	return {
 		"success": True,
 		"status": txn.status,
 		"response_code": response_code,
-		"message": response_data.get("ResponseMessage") or "Unknown response code",
+		"message": unknown_msg,
 	}
 
 
@@ -306,3 +353,23 @@ def _shape(*, success, txn, response_code, message):
 		"response_code": response_code,
 		"message": message,
 	}
+
+
+def _txn_age_minutes(txn) -> float:
+	"""Minutes since the Pinelabs Transaction was created."""
+	created = txn.created_at or txn.creation
+	if not created:
+		return 0.0
+	return time_diff_in_seconds(get_datetime(), get_datetime(created)) / 60.0
+
+
+def _auto_cancel_minutes(txn) -> int:
+	"""Per-machine override for auto-cancel age (falls back to the default)."""
+	if not txn.machine:
+		return _DEFAULT_AUTO_CANCEL_MINUTES
+	minutes = frappe.db.get_value(
+		"Pinelabs Machine Config",
+		txn.machine,
+		"auto_cancel_duration_in_minutes",
+	)
+	return cint(minutes) or _DEFAULT_AUTO_CANCEL_MINUTES

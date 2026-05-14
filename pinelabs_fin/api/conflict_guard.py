@@ -16,8 +16,6 @@ Wired into the framework via ``hooks.doc_events`` on Payment Entry's
 import frappe
 from frappe import _
 
-from pinelabs_fin.api.transaction import PE_NATIVE_DOCTYPES
-
 
 def refuse_if_pinelabs_active(doc, method=None):
 	"""Throw when an in-flight Pinelabs Transaction conflicts with this PE.
@@ -26,6 +24,11 @@ def refuse_if_pinelabs_active(doc, method=None):
 	before ``insert()`` so this check returns immediately for them. A PE
 	created by ERPNext UI / a Server Script / any other path has no
 	such flag and is checked against the active-transaction set.
+
+	The check is doctype-agnostic — any reference with an active Pinelabs
+	Transaction blocks the PE, including custom doctypes that finalize via
+	status-field mapping (where the dual-recording window is otherwise
+	exactly the same as on PE-native doctypes).
 	"""
 	# Our own PE — created by api/transaction.py's mark_success. Allow.
 	if doc.flags.get("pinelabs_internal_pe"):
@@ -33,7 +36,7 @@ def refuse_if_pinelabs_active(doc, method=None):
 
 	# Walk references; block if ANY one has an active Pinelabs Transaction.
 	for ref in (doc.references or []):
-		if ref.reference_doctype not in PE_NATIVE_DOCTYPES:
+		if not (ref.reference_doctype and ref.reference_name):
 			continue
 		active = frappe.db.get_value(
 			"Pinelabs Transaction",

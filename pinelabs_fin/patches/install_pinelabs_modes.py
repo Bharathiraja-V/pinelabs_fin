@@ -3,11 +3,24 @@
 
 """Install patch (idempotent).
 
-Adds the four PineLabs custom fields to the standard ERPNext `Mode of Payment`
-doctype and seeds the four canonical PineLabs Mode of Payment records.
+Adds the four PineLabs custom fields to the standard ERPNext ``Mode of Payment``
+doctype and seeds the three canonical PineLabs Mode of Payment records:
 
-Mode of Payment is the new source of truth for "which Pine Labs payment
-methods exist and how they route" — Settings no longer carries that list.
+- ``PineLabs - Card``         — terminal flow (physical device, card)
+- ``PineLabs - UPI``          — terminal flow (physical device, UPI)
+- ``PineLabs - Payment Link`` — Plural hosted link (one row covers every
+                                  method the customer can pick on Plural's
+                                  page: card / UPI / NB / wallet)
+
+Each row needs a default account configured per company under
+``Mode of Payment → Accounts`` before the first payment goes through;
+the initiate-time pre-flight in ``api/transaction.py`` enforces this
+and throws a clear error before the customer is asked to pay.
+
+Existing installs that still carry the older ``PineLabs - NetBanking``
+or ``PineLabs - Wallet`` rows from earlier versions are left untouched
+(deleting them could orphan historical Payment Entries). New installs
+get only the three rows above.
 """
 
 import frappe
@@ -62,32 +75,28 @@ SEED_MODES = [
 	{
 		"mode_of_payment": "PineLabs - Card",
 		"type": "Bank",
-		"flow_type": "Both",
+		"flow_type": "Terminal",
 		"terminal_code": 1,
-		"plural_method": "CARD",
+		"plural_method": "",
 	},
 	{
 		"mode_of_payment": "PineLabs - UPI",
 		"type": "Bank",
-		"flow_type": "Both",
+		"flow_type": "Terminal",
 		"terminal_code": 11,
-		"plural_method": "UPI",
+		"plural_method": "",
 	},
 	{
-		# Plural-only: terminal_code = 0 means "not applicable"; the
-		# underlying column is NOT NULL so we cannot store None directly.
-		"mode_of_payment": "PineLabs - NetBanking",
+		# One mode for the whole Plural flow. The customer can still pick
+		# CARD / UPI / NB / WALLET on Plural's hosted page; the actual
+		# method is captured on Pinelabs Transaction.payment_method and on
+		# the Payment Entry's reference_no via the Plural payment_id —
+		# the Mode of Payment itself stays a single ledger account.
+		"mode_of_payment": "PineLabs - Payment Link",
 		"type": "Bank",
 		"flow_type": "Plural",
 		"terminal_code": 0,
-		"plural_method": "NB",
-	},
-	{
-		"mode_of_payment": "PineLabs - Wallet",
-		"type": "Bank",
-		"flow_type": "Plural",
-		"terminal_code": 0,
-		"plural_method": "WALLET",
+		"plural_method": "",
 	},
 ]
 

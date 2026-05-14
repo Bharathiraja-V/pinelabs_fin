@@ -66,6 +66,17 @@ def initiate_payment_link(
 	# Fail fast BEFORE we ask Plural to deliver a link — if finalization
 	# won't work for this doctype, the customer should never see the link.
 	txn_service.validate_finalization_ready(reference_doctype)
+	# Every Plural payment finalizes through the single "PineLabs - Payment Link"
+	# Mode of Payment. Confirm its default account is mapped for this company
+	# now — surfacing the misconfig before the link is sent costs nothing,
+	# discovering it after the customer pays leaves them charged and the
+	# invoice unfinalized. Skipped automatically when the doctype's
+	# finalization path doesn't create a Payment Entry.
+	txn_service.assert_mode_has_account_mapped(
+		txn_service.get_plural_mode_of_payment(),
+		getattr(source_doc, "company", None),
+		reference_doctype=reference_doctype,
+	)
 	amount = _amount_for(source_doc)
 	if amount <= 0:
 		frappe.throw(_("No outstanding amount on {0} {1}.").format(reference_doctype, reference_name))
@@ -132,6 +143,20 @@ def refresh_payment_link_status(transaction_name: str) -> dict:
 		frappe.throw(_("Transaction {0} is not a Plural transaction.").format(transaction_name))
 	if txn.status in ("SUCCESS", "FAILED", "CANCELLED"):
 		return {"success": True, "status": txn.status, "message": "Already terminal"}
+
+	# If the source doc has been deleted since the link was sent, neither the
+	# webhook path nor PE creation can finalize this txn. Mark it FAILED so the
+	# cron stops looping and the operator sees a clear explanation, instead of
+	# the row sitting PENDING forever.
+	if not frappe.db.exists(txn.reference_doctype, txn.reference_name):
+		txn_service.mark_failed(
+			txn,
+			error_message=(
+				f"Source {txn.reference_doctype} {txn.reference_name} no longer "
+				f"exists; cannot finalize this payment link."
+			),
+		)
+		return {"success": True, "status": "FAILED", "message": "Source doc deleted"}
 
 	client = get_plural_client()
 	result = client.get_payment_link_status(txn.reference_name)

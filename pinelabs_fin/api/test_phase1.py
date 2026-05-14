@@ -392,6 +392,31 @@ def _ensure_default_machine():
 		})
 		settings.flags.ignore_mandatory = True
 		settings.save(ignore_permissions=True)
+	_ensure_pinelabs_mop_accounts()
+
+
+def _ensure_pinelabs_mop_accounts():
+	"""Map a default account on each PineLabs Mode of Payment for _Test Company.
+
+	The initiate-time account-mapping pre-flight (transaction.assert_mode_has_account_mapped)
+	would otherwise throw before any of the mocked HTTP calls is reached.
+	"""
+	company = "_Test Company"
+	default_account = frappe.db.get_value(
+		"Account", {"company": company, "account_type": "Bank"}, "name"
+	) or "_Test Bank - _TC"
+	for mode in ("PineLabs - Card", "PineLabs - UPI", "PineLabs - Payment Link"):
+		if not frappe.db.exists("Mode of Payment", mode):
+			continue
+		already = frappe.db.exists(
+			"Mode of Payment Account", {"parent": mode, "company": company}
+		)
+		if already:
+			continue
+		mode_doc = frappe.get_doc("Mode of Payment", mode)
+		mode_doc.append("accounts", {"company": company, "default_account": default_account})
+		mode_doc.flags.ignore_permissions = True
+		mode_doc.save()
 
 
 def _ensure_routing_machines():
