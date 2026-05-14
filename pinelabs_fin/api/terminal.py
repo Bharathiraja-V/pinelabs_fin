@@ -124,6 +124,10 @@ def initiate_terminal_payment(
 	response_code = response_data.get("ResponseCode")
 	plutus_ref = response_data.get("PlutusTransactionReferenceID")
 	plutus_ref_str = str(plutus_ref) if plutus_ref else None
+	# Surfaced by the client so we can persist exactly what the app sent
+	# alongside what Pine Labs returned. Same shape Plural already stores
+	# at create_transaction time — this brings the Terminal flow to parity.
+	request_payload = response.get("request_payload")
 
 	# ResponseCode mapping (UploadBilledTransaction):
 	#   0    = accepted, terminal is now processing → PENDING
@@ -133,6 +137,7 @@ def initiate_terminal_payment(
 			txn,
 			error_message=response.get("error") or _("Pine Labs API call failed"),
 			response_payload=response_data or response,
+			request_payload=request_payload,
 		)
 		return _shape(success=False, txn=txn, response_code=response_code, message=response.get("error"))
 
@@ -143,6 +148,7 @@ def initiate_terminal_payment(
 			txn,
 			payment_id=plutus_ref_str,
 			response_payload=response_data,
+			request_payload=request_payload,
 		)
 		return _shape(success=True, txn=txn, response_code=response_code, message=response_data.get("ResponseMessage"))
 
@@ -151,6 +157,7 @@ def initiate_terminal_payment(
 		txn,
 		error_message=response_data.get("ResponseMessage") or _("Terminal declined the request"),
 		response_payload=response_data,
+		request_payload=request_payload,
 	)
 	return _shape(success=False, txn=txn, response_code=response_code, message=response_data.get("ResponseMessage"))
 

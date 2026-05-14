@@ -54,14 +54,21 @@ Pine Labs payment integration for Frappe & ERPNext — take terminal payments or
 - Webhook + 1-minute reconcile cron mark the invoice **Paid** when the customer pays.
 
 **Marketplace-clean integration:**
-- Zero custom fields on Sales Invoice, POS Invoice, Payment Entry, Customer or Contact.
+- Zero custom fields on Sales Invoice, POS Invoice, Payment Entry, Customer, Contact — or **Mode of Payment**. Pine Labs Modes are identified by name only.
+- Three canonical Modes of Payment seeded on install: `PineLabs - Card`, `PineLabs - UPI`, `PineLabs - Payment Link`.
 - All payment state lives in a dedicated `Pinelabs Transaction` doctype, linked via Dynamic Link.
-- Supports Sales Invoice, POS Invoice, Payment Request, and any custom payable doctype.
+- Supports Sales Invoice, POS Invoice, Payment Request natively; any custom payable doctype via the `create_payment_entry` API flag.
+
+**Fail-fast before charging the customer:**
+- Account-mapping pre-flight — the chosen Mode of Payment must have a default account configured for the source doc's company. If not, the API throws a clean error before contacting Pine Labs.
+- Customer-resolution pre-flight (for PE creation) — the source doc's customer / Global Default must resolve. If not, error fires before charge.
+- No more stuck-PENDING transactions: every misconfig surfaces *before* the gateway is called.
 
 **Operations:**
 - Multi-terminal routing — pick a terminal automatically by user, warehouse, or POS profile.
 - Every API exchange is captured on the Pinelabs Transaction record (request, response, error).
 - Whitelisted Python + JS APIs to drive the same flows from your own buttons / hooks / scripts.
+- `create_payment_entry` parameter on every API — override the Payable Documents config per call (`0` = skip PE, `1` = force PE creation).
 
 ---
 
@@ -124,6 +131,19 @@ Click **Test Plural Connection** to verify. Then on the Plural dashboard, regist
 ```
 https://<your-erpnext-host>/api/method/pinelabs_fin.api.webhook.handle_webhook
 ```
+
+### Configure Mode of Payment accounts (required)
+
+Each of the three canonical Modes of Payment (`PineLabs - Card`, `PineLabs - UPI`, `PineLabs - Payment Link`) needs a default ledger account per company. Without this, the Payment Entry created on payment success would have nowhere to post.
+
+For **each** of the three modes:
+
+1. Awesome Bar → **Mode of Payment** → pick the row (e.g. `PineLabs - Card`).
+2. Scroll to the **Accounts** child table.
+3. Add a row: **Company** = your company, **Default Account** = the bank / cash account that should receive Pine Labs settlements.
+4. Save.
+
+If you skip this and click Pay on Machine / Send Payment Link, the app throws a clear error **before** contacting Pine Labs — the customer is never charged for a payment we can't book.
 
 ### Configure Payable Documents
 
@@ -212,38 +232,63 @@ Three whitelisted Python entry points — callable from JS or REST.
 ```python
 # Pay on Machine
 pinelabs_fin.api.terminal.initiate_terminal_payment(
-    reference_doctype,    # required — e.g. "Sales Invoice"
-    reference_name,       # required — e.g. "ACC-SINV-2026-00054"
-    mode_of_payment,      # required — a PineLabs-enabled Mode of Payment
-    amount=None,          # optional — defaults to source doc's outstanding
+    reference_doctype,           # required — e.g. "Sales Invoice"
+    reference_name,              # required — e.g. "ACC-SINV-2026-00054"
+    mode_of_payment,             # required — "PineLabs - Card" or "PineLabs - UPI"
+    amount=None,                 # optional — defaults to source doc's outstanding
+    create_payment_entry=None,   # optional — 0 / 1; see "create_payment_entry" below
 )
 
 # Send Payment Link
 pinelabs_fin.api.plural.initiate_payment_link(
-    reference_doctype,        # required
-    reference_name,           # required
-    flow="all_methods",       # optional — "all_methods" / "upi_only" / "card_only"
-    expiry_minutes=None,      # optional — defaults to 1440 (24 h)
-    customer_email=None,      # optional — inline override
-    customer_mobile=None,     # optional — inline override
+    reference_doctype,           # required
+    reference_name,              # required
+    flow="all_methods",          # optional — "all_methods" / "upi_only" / "card_only"
+    expiry_minutes=None,         # optional — defaults to 1440 (24 h)
+    customer_email=None,         # optional — inline override
+    customer_mobile=None,        # optional — inline override
+    create_payment_entry=None,   # optional — 0 / 1; see "create_payment_entry" below
 )
 
 # Poll a Pay-on-Machine transaction
 pinelabs_fin.api.terminal.check_terminal_status(
-    transaction_name,    # required — the PLT-... from initiate_terminal_payment
+    transaction_name,            # required — the PLT-... from initiate_terminal_payment
+    create_payment_entry=None,   # optional — late override of the same flag
 )
 ```
+
+### `create_payment_entry`
+
+A per-call override of the Payable Documents row's `Create Payment Entry` setting. Useful when calling the APIs from your own custom button on a doctype that doesn't have a Payable Documents row (or has one configured for mapped-field finalization).
+
+| Value | Effect |
+|---|---|
+| `1` | Force PE creation on success. Runs the account-mapping + customer-resolution pre-flight before contacting Pine Labs |
+| `0` | Skip PE creation. Falls back to mapped-field finalization if configured, otherwise leaves the source doc untouched |
+| omitted / `None` | Use the Payable Documents row's setting (or "no PE" if the source doctype isn't PE-native and has no row) |
+
+For a custom doctype with `create_payment_entry=1`, the app builds the PE manually since ERPNext's `get_payment_entry` helper only supports Sales Invoice / POS Invoice / Payment Request. The source doctype should expose a `customer` Link field (or fall back to ERPNext's Default Customer in Global Defaults) so `party_type = Customer` can be set on the PE.
 
 Plus two JS helpers on `frappe.pinelabs.*` that wrap the API and open the same UI the built-in buttons use:
 
 ```javascript
 frappe.pinelabs.start_terminal_payment(
-  { reference_doctype: frm.doctype, reference_name: frm.docname, mode_of_payment: "PineLabs - Card" },
+  {
+    reference_doctype: frm.doctype,
+    reference_name: frm.docname,
+    mode_of_payment: "PineLabs - Card",
+    create_payment_entry: 1,   // optional
+  },
   { on_settled: () => frm.reload_doc() },
 );
 
 frappe.pinelabs.start_payment_link(
-  { reference_doctype: frm.doctype, reference_name: frm.docname, flow: "all_methods" },
+  {
+    reference_doctype: frm.doctype,
+    reference_name: frm.docname,
+    flow: "all_methods",
+    create_payment_entry: 1,   // optional
+  },
   { on_link: () => frm.reload_doc() },
 );
 ```
@@ -253,8 +298,9 @@ frappe.pinelabs.start_payment_link(
 ## Limitations
 
 - **Refunds** are not initiated by the app — use Pine Labs' own refund flow, then reflect the change in ERPNext manually.
-- **Currency** — only INR.
-- **Automatic Payment Entry** works for Sales Invoice, POS Invoice and Payment Request. Custom doctypes use the status-field mapping path instead.
+- **Currency** — only INR (Plural's API does not accept other currencies in this release).
+- **Automatic Payment Entry** — works natively for Sales Invoice, POS Invoice and Payment Request. Custom doctypes can also create PEs by passing `create_payment_entry=1` to the API (and exposing a `customer` Link field or using ERPNext's Default Customer). Otherwise the app uses the mapped-status-field path or the permissive "no PE" path.
+- **Renaming the canonical Modes of Payment** (`PineLabs - Card` / `PineLabs - UPI` / `PineLabs - Payment Link`) breaks the integration silently — Pine Labs modes are identified by name, not by custom fields.
 
 ---
 

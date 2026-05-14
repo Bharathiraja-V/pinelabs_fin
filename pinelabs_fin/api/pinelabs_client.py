@@ -488,13 +488,16 @@ class PineLabsClient:
 	def upload_billed_raw(self, transaction_ref, amount, allowed_payment_mode):
 		"""Pure-HTTP wrapper around UploadBilledTransaction.
 
-		Returns the raw response dict (the same shape `_make_request` produces).
-		Caller is responsible for persisting state (transaction.py).
+		Returns the raw response dict (the same shape `_make_request` produces),
+		with ``request_payload`` added so the caller can persist exactly what
+		the app sent to Pine Labs on this transaction's Pinelabs Transaction row.
 		"""
 		# _build_transaction_payload expects "Card" or "UPI" — translate from int code.
 		mode = "Card" if int(allowed_payment_mode) == 1 else "UPI"
 		payload = self._build_transaction_payload(transaction_ref, amount, mode)
-		return self._make_request(self.upload_endpoint, payload)
+		response = self._make_request(self.upload_endpoint, payload)
+		response["request_payload"] = payload
+		return response
 
 	def get_status_raw(self, plutus_ref_id):
 		"""Pure-HTTP wrapper around GetCloudBasedTxnStatus."""
@@ -505,7 +508,9 @@ class PineLabsClient:
 			"StoreID": self.store_id,
 			"PlutusTransactionReferenceID": int(plutus_ref_id),
 		}
-		return self._make_request(self.status_endpoint, payload)
+		response = self._make_request(self.status_endpoint, payload)
+		response["request_payload"] = payload
+		return response
 
 	def cancel_raw(self, plutus_ref_id):
 		"""Pure-HTTP wrapper around CancelTransaction."""
@@ -515,7 +520,9 @@ class PineLabsClient:
 			"PlutusTransactionReferenceID": int(plutus_ref_id),
 			"UserID": frappe.session.user,
 		}
-		return self._make_request(self.cancel_endpoint, payload)
+		response = self._make_request(self.cancel_endpoint, payload)
+		response["request_payload"] = payload
+		return response
 
 	# ─────────────────────────────────────────────────────────────────────
 	# Plural API plumbing — moved to ``api/plural_client.py``.

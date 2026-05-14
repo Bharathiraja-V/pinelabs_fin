@@ -215,7 +215,7 @@ def get_active_for_doc(reference_doctype, reference_name):
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def mark_pending(transaction, *, order_id=None, payment_id=None, response_payload=None):
+def mark_pending(transaction, *, order_id=None, payment_id=None, response_payload=None, request_payload=None):
 	"""Move a transaction from INITIATED to PENDING.
 
 	Called right after the gateway accepts the request but before the
@@ -239,6 +239,8 @@ def mark_pending(transaction, *, order_id=None, payment_id=None, response_payloa
 		updates["payment_id"] = payment_id
 	if response_payload is not None:
 		updates["response_payload"] = _to_json_str(response_payload)
+	if request_payload is not None:
+		updates["request_payload"] = _to_json_str(request_payload)
 
 	transaction.flags.pinelabs_internal_transition = True
 	transaction.update(updates)
@@ -247,7 +249,7 @@ def mark_pending(transaction, *, order_id=None, payment_id=None, response_payloa
 	return transaction
 
 
-def mark_success(transaction, *, payment_id, payment_method=None, response_payload=None):
+def mark_success(transaction, *, payment_id, payment_method=None, response_payload=None, request_payload=None):
 	"""Mark transaction SUCCESS and create the Payment Entry idempotently.
 
 	This is the ONLY path that creates Payment Entries. Wraps the PE creation
@@ -270,6 +272,8 @@ def mark_success(transaction, *, payment_id, payment_method=None, response_paylo
 	transaction.payment_id = payment_id
 	if response_payload is not None:
 		transaction.response_payload = _to_json_str(response_payload)
+	if request_payload is not None:
+		transaction.request_payload = _to_json_str(request_payload)
 	transaction.completed_at = now_datetime()
 
 	mode_of_payment = _resolve_mode_of_payment(transaction)
@@ -298,7 +302,7 @@ def mark_success(transaction, *, payment_id, payment_method=None, response_paylo
 	return transaction
 
 
-def mark_failed(transaction, *, error_message=None, response_payload=None):
+def mark_failed(transaction, *, error_message=None, response_payload=None, request_payload=None):
 	"""Move a transaction to FAILED. Idempotent."""
 	transaction = _lock_and_reload(transaction)
 	if transaction.status == "FAILED":
@@ -314,6 +318,8 @@ def mark_failed(transaction, *, error_message=None, response_payload=None):
 		transaction.error_message = _truncate_with_ellipsis(error_message, 1000)
 	if response_payload is not None:
 		transaction.response_payload = _to_json_str(response_payload)
+	if request_payload is not None:
+		transaction.request_payload = _to_json_str(request_payload)
 	transaction.flags.pinelabs_internal_transition = True
 	transaction.save(ignore_permissions=True)
 	_publish_status_update(transaction)

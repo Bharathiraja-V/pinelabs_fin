@@ -338,6 +338,11 @@ class PinelabsTestPaymentPage {
 					flow: "all_methods",
 					customer_email: inputs.email,
 					customer_mobile: inputs.mobile,
+					// Same opt-in as the Card / UPI buttons. Server-side
+					// pre-flight will verify the Plural Mode of Payment has
+					// an account mapped for the company AND that a party
+					// (Customer) can be resolved BEFORE the link is generated.
+					create_payment_entry: 1,
 				},
 				{
 					on_link: (url, txn) => {
