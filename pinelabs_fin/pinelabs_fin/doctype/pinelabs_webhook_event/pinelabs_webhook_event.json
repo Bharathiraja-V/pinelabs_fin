@@ -1,0 +1,44 @@
+{
+ "actions": [],
+ "allow_rename": 0,
+ "autoname": "format:PWE-{YYYY}-{####}",
+ "creation": "2026-05-11 14:00:00.000000",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "header_section",
+  "event_id",
+  "event_type",
+  "status",
+  "column_break_header",
+  "received_at",
+  "pinelabs_transaction",
+  "payload_section",
+  "payload"
+ ],
+ "fields": [
+  {"fieldname": "header_section", "fieldtype": "Section Break", "label": "Event"},
+  {"description": "Stable id used to dedupe incoming Plural webhooks at the DB level. Provider event id when present; otherwise a SHA256 hash of the raw body. UNIQUE — a second delivery of the same event is rejected by the database, not by app logic.", "fieldname": "event_id", "fieldtype": "Data", "in_list_view": 1, "in_standard_filter": 1, "label": "Event ID", "reqd": 1, "unique": 1},
+  {"fieldname": "event_type", "fieldtype": "Data", "in_list_view": 1, "in_standard_filter": 1, "label": "Event Type"},
+  {"default": "received", "fieldname": "status", "fieldtype": "Select", "in_list_view": 1, "in_standard_filter": 1, "label": "Status", "options": "received\nprocessed\nignored\nfailed"},
+  {"fieldname": "column_break_header", "fieldtype": "Column Break"},
+  {"fieldname": "received_at", "fieldtype": "Datetime", "in_list_view": 1, "label": "Received At"},
+  {"description": "The Pinelabs Transaction this webhook resolved to (if any).", "fieldname": "pinelabs_transaction", "fieldtype": "Link", "in_list_view": 1, "label": "Pinelabs Transaction", "options": "Pinelabs Transaction"},
+  {"collapsible": 1, "fieldname": "payload_section", "fieldtype": "Section Break", "label": "Payload (debug)"},
+  {"fieldname": "payload", "fieldtype": "Long Text", "label": "Raw Payload", "read_only": 1}
+ ],
+ "index_web_pages_for_search": 0,
+ "links": [],
+ "modified": "2026-05-11 14:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Pinelabs Fin",
+ "name": "Pinelabs Webhook Event",
+ "owner": "Administrator",
+ "permissions": [
+  {"create": 0, "delete": 0, "email": 0, "print": 1, "read": 1, "role": "System Manager", "share": 0, "write": 0}
+ ],
+ "row_format": "Dynamic",
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

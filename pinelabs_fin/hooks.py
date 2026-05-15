@@ -1,14 +1,14 @@
 app_name = "pinelabs_fin"
 app_title = "Pinelabs Fin"
-app_publisher = "pine"
-app_description = "pine"
-app_email = "pinelab12@gmail.com"
+app_publisher = "Finstein"
+app_description = "Pine Labs payments for ERPNext: terminal taps and hosted payment links, with auto Payment Entry on success."
+app_email = "bharathiraja.b@finstein.ai"
 app_license = "mit"
 
 # Apps
 # ------------------
 
-# required_apps = []
+required_apps = ["erpnext"]
 
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
@@ -26,12 +26,7 @@ app_license = "mit"
 
 # include js, css files in header of desk.html
 # app_include_css = "/assets/pinelabs_fin/css/pinelabs_fin.css"
-# Shared PineLabs helper is loaded first, then the dynamic button injector
-# can register doctype hooks on top of it.
-app_include_js = [
-	"/assets/pinelabs_fin/js/pinelabs_payment.js",
-	"/assets/pinelabs_fin/js/form_button_injector.js",
-]
+app_include_js = ["/assets/pinelabs_fin/js/pinelabs_buttons.js"]
 
 # include js, css files in header of web template
 # web_include_css = "/assets/pinelabs_fin/css/pinelabs_fin.css"
@@ -47,6 +42,8 @@ app_include_js = [
 # include js in page
 # page_js = {"page" : "public/js/file.js"}
 
+# include js in doctype views
+# doctype_js = {"doctype" : "public/js/doctype.js"}
 # doctype_list_js = {"doctype" : "public/js/doctype_list.js"}
 # doctype_tree_js = {"doctype" : "public/js/doctype_tree.js"}
 # doctype_calendar_js = {"doctype" : "public/js/doctype_calendar.js"}
@@ -86,7 +83,7 @@ app_include_js = [
 # ------------
 
 # before_install = "pinelabs_fin.install.before_install"
-# after_install = "pinelabs_fin.install.after_install"
+after_install = "pinelabs_fin.install.after_install"
 
 # Uninstallation
 # ------------
@@ -140,34 +137,33 @@ app_include_js = [
 # ---------------
 # Hook on document methods and events
 
-# doc_events = {
-# 	"*": {
-# 		"on_update": "method",
-# 		"on_cancel": "method",
-# 		"on_trash": "method"
-# 	}
-# }
+# Refuse a manual Payment Entry when a Pine Labs payment is in flight
+# for the same source doc. Pairs with the finalize-time guard in
+# api/transaction.py so the two payment flows can never silently
+# double-record the same invoice. Our own PEs bypass this via
+# flags.pinelabs_internal_pe.
+doc_events = {
+	"Payment Entry": {
+		"validate": "pinelabs_fin.api.conflict_guard.refuse_if_pinelabs_active",
+	},
+}
 
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"pinelabs_fin.tasks.all"
-# 	],
-# 	"daily": [
-# 		"pinelabs_fin.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"pinelabs_fin.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"pinelabs_fin.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"pinelabs_fin.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+	"cron": {
+		# Reconcile any PENDING transactions with Pine Labs every minute.
+		# - Terminal: catches users who closed the dialog before the foreground
+		#   poll saw a terminal state.
+		# - Plural: catches missed webhooks (no public URL, dropped
+		#   delivery, secret mismatch, …) so doc finalizes without manual click.
+		"* * * * *": [
+			"pinelabs_fin.api.terminal.reconcile_pending_terminal_payments",
+			"pinelabs_fin.api.plural.reconcile_pending_plural_payments",
+		],
+	},
+}
 
 # Testing
 # -------
