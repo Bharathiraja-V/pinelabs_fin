@@ -290,12 +290,14 @@ frappe.pinelabs.start_payment_link(
 
 ## License
 
-MIT — see [license.txt](license.txt).
+MIT — see [LICENSE](LICENSE).
 
 ---
 
-<div align="center">
+<p align="center"><strong>Built with Frappe&nbsp; · &nbsp;by Finstein</strong></p>
 
-Built with <img src="logos/frappe_logo.png" alt="Frappe" height="50"> &nbsp;·&nbsp; by <img src="logos/finstein_logo.png" alt="Finstein" height="50">
-
-</div>
+<p align="center">
+  <img src="logos/frappe_logo.png" alt="Frappe" height="32">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="logos/finstein_logo.png" alt="Finstein" height="32">
+</p>
