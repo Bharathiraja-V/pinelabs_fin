@@ -1,7 +1,7 @@
 [project]
 name = "pinelabs_fin"
 authors = [
-    { name = "Finstein", email = "praveenit2003@gmail.com" }
+    { name = "Finstein", email = "bharathiraja.b@finstein.ai" }
 ]
 description = "Pine Labs payments for ERPNext: terminal taps and hosted payment links, with auto Payment Entry on success."
 requires-python = ">=3.10"
