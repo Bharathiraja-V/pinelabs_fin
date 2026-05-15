@@ -1,9 +1,8 @@
-<table width="100%" border="0" cellspacing="0" cellpadding="0">
-<tr>
-<td align="left"><img src="logos/finstein_logo.png" alt="Finstein" height="56"></td>
-<td align="right"><img src="logos/frappe_logo.png" alt="Frappe" height="56"></td>
-</tr>
-</table>
+<p align="center">
+  <img src="logos/finstein_logo.png" alt="Finstein" height="56">
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="logos/frappe_logo.png" alt="Frappe" height="56">
+</p>
 
 <div align="center" markdown="1">
 
