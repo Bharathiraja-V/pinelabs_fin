@@ -1,0 +1,207 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-05-06 00:00:00.000000",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "doctype_name",
+  "show_on_docstatus",
+  "is_enabled",
+  "enable_pay_on_machine",
+  "enable_send_payment_link",
+  "amount_field",
+  "status_field",
+  "paid_status_value",
+  "link_payment_entry_field",
+  "finalize_via_payment_entry",
+  "customer_contact_section",
+  "mobile_fetch_from",
+  "mobile_direct_field",
+  "mobile_link_field",
+  "mobile_linked_doctype",
+  "mobile_linked_field",
+  "customer_contact_column",
+  "email_fetch_from",
+  "email_direct_field",
+  "email_link_field",
+  "email_linked_doctype",
+  "email_linked_field"
+ ],
+ "fields": [
+  {
+   "description": "Source DocType that should show the Pine Labs payment buttons (e.g. Sales Invoice).",
+   "fieldname": "doctype_name",
+   "fieldtype": "Link",
+   "in_list_view": 1,
+   "label": "DocType",
+   "options": "DocType",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "description": "Use 0 for Drafts, 1 for Submitted, or 0,1 for both. Cancelled documents are always excluded.",
+   "fieldname": "show_on_docstatus",
+   "fieldtype": "Select",
+   "in_list_view": 1,
+   "label": "Show on docstatus",
+   "options": "0\n1\n0,1",
+   "reqd": 1
+  },
+  {
+   "default": "1",
+   "fieldname": "is_enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "default": "1",
+   "description": "Show the 'Pay on Machine' button on this doctype. Uncheck to hide the terminal-payment button while leaving the row enabled.",
+   "fieldname": "enable_pay_on_machine",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Pay on Machine"
+  },
+  {
+   "default": "1",
+   "description": "Show the 'Send Payment Link' button on this doctype. Uncheck to hide the Pay-by-Link button while leaving the row enabled.",
+   "fieldname": "enable_send_payment_link",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Send Payment Link"
+  },
+  {
+   "description": "Field on the source doctype that holds the payable amount (e.g. outstanding_amount, grand_total).",
+   "fieldname": "amount_field",
+   "fieldtype": "Autocomplete",
+   "in_list_view": 1,
+   "label": "Amount Field",
+   "reqd": 1
+  },
+  {
+   "description": "Field on the source doctype to update after a successful payment (used only when Create Payment Entry is unchecked).",
+   "fieldname": "status_field",
+   "fieldtype": "Autocomplete",
+   "label": "Status Field"
+  },
+  {
+   "description": "Value to write into Status Field after a successful payment (e.g. Paid, Completed, Submitted).",
+   "fieldname": "paid_status_value",
+   "fieldtype": "Data",
+   "label": "Paid Status Value"
+  },
+  {
+   "description": "Optional field on the source doctype where the Pinelabs Transaction id (PLT-...) is stored after success.",
+   "fieldname": "link_payment_entry_field",
+   "fieldtype": "Autocomplete",
+   "label": "Transaction Reference Field"
+  },
+  {
+   "default": "1",
+   "description": "If checked, a standard ERPNext Payment Entry is created on success. If unchecked, only the Status Field on the source doctype is updated.",
+   "fieldname": "finalize_via_payment_entry",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Create Payment Entry"
+  },
+  {
+   "description": "Map where to read customer mobile and email from on this DocType. Used by Send Payment Link and any other flow that needs customer contact details. If unset, Pinelabs falls back to a generic auto-detect against common field names (contact_email, contact_mobile, etc.).",
+   "fieldname": "customer_contact_section",
+   "fieldtype": "Section Break",
+   "label": "Customer Contact Field Mapping"
+  },
+  {
+   "description": "How to read the customer's mobile number from this DocType. Leave blank to use the generic auto-detect.",
+   "fieldname": "mobile_fetch_from",
+   "fieldtype": "Select",
+   "label": "Mobile — Fetch From",
+   "options": "\nDirect Field\nLinked DocType"
+  },
+  {
+   "depends_on": "eval:doc.mobile_fetch_from == 'Direct Field'",
+   "description": "Field on this DocType that holds the mobile number. Example: contact_mobile, customer_mobile, mobile_no.",
+   "fieldname": "mobile_direct_field",
+   "fieldtype": "Autocomplete",
+   "label": "Mobile — Field Name"
+  },
+  {
+   "depends_on": "eval:doc.mobile_fetch_from == 'Linked DocType'",
+   "description": "Field on this DocType that links to the other DocType. Example: contact_person, customer.",
+   "fieldname": "mobile_link_field",
+   "fieldtype": "Autocomplete",
+   "label": "Mobile — Link Field (on this DocType)"
+  },
+  {
+   "depends_on": "eval:doc.mobile_fetch_from == 'Linked DocType'",
+   "description": "The DocType that the link field points to. Example: Contact, Customer.",
+   "fieldname": "mobile_linked_doctype",
+   "fieldtype": "Link",
+   "label": "Mobile — Linked DocType",
+   "options": "DocType"
+  },
+  {
+   "depends_on": "eval:doc.mobile_fetch_from == 'Linked DocType'",
+   "description": "Field name inside the linked DocType that holds the mobile number. Example: mobile_no, phone, custom_mobile.",
+   "fieldname": "mobile_linked_field",
+   "fieldtype": "Autocomplete",
+   "label": "Mobile — Field in Linked DocType"
+  },
+  {
+   "fieldname": "customer_contact_column",
+   "fieldtype": "Column Break"
+  },
+  {
+   "description": "How to read the customer's email address from this DocType. Leave blank to use the generic auto-detect.",
+   "fieldname": "email_fetch_from",
+   "fieldtype": "Select",
+   "label": "Email — Fetch From",
+   "options": "\nDirect Field\nLinked DocType"
+  },
+  {
+   "depends_on": "eval:doc.email_fetch_from == 'Direct Field'",
+   "description": "Field on this DocType that holds the email address. Example: contact_email, customer_email, email_id.",
+   "fieldname": "email_direct_field",
+   "fieldtype": "Autocomplete",
+   "label": "Email — Field Name"
+  },
+  {
+   "depends_on": "eval:doc.email_fetch_from == 'Linked DocType'",
+   "description": "Field on this DocType that links to the other DocType. Example: contact_person, customer.",
+   "fieldname": "email_link_field",
+   "fieldtype": "Autocomplete",
+   "label": "Email — Link Field (on this DocType)"
+  },
+  {
+   "depends_on": "eval:doc.email_fetch_from == 'Linked DocType'",
+   "description": "The DocType that the link field points to. Example: Contact, Customer.",
+   "fieldname": "email_linked_doctype",
+   "fieldtype": "Link",
+   "label": "Email — Linked DocType",
+   "options": "DocType"
+  },
+  {
+   "depends_on": "eval:doc.email_fetch_from == 'Linked DocType'",
+   "description": "Field name inside the linked DocType that holds the email address. Example: email_id, email, custom_email.",
+   "fieldname": "email_linked_field",
+   "fieldtype": "Autocomplete",
+   "label": "Email — Field in Linked DocType"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-05-06 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Pinelabs Fin",
+ "name": "Pinelabs Payable Doctype",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "creation",
+ "sort_order": "DESC",
+ "states": []
+}

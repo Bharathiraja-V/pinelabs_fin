@@ -1,0 +1,112 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-03-30 18:46:25.624634",
+ "doctype": "DocType",
+ "editable_grid": 1,
+ "engine": "InnoDB",
+ "field_order": [
+  "machine_name",
+  "merchant_id",
+  "client_id",
+  "security_token",
+  "store_id",
+  "device_number",
+  "auto_cancel_duration_in_minutes",
+  "enabled",
+  "is_default",
+  "description"
+ ],
+ "fields": [
+  {
+   "description": "Unique name for this machine configuration",
+   "fieldname": "machine_name",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Machine Name",
+   "reqd": 1
+  },
+  {
+   "description": "Pine Labs Merchant ID",
+   "fieldname": "merchant_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Merchant ID",
+   "reqd": 1
+  },
+  {
+   "description": "Pine Labs Client ID",
+   "fieldname": "client_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Client ID",
+   "reqd": 1
+  },
+  {
+   "description": "Pine Labs Security Token (encrypted)",
+   "fieldname": "security_token",
+   "fieldtype": "Password",
+   "in_list_view": 1,
+   "label": "Security Token",
+   "reqd": 1
+  },
+  {
+   "description": "Pine Labs Store ID",
+   "fieldname": "store_id",
+   "fieldtype": "Data",
+   "in_list_view": 1,
+   "label": "Store ID",
+   "reqd": 1
+  },
+  {
+   "description": "Device Number",
+   "fieldname": "device_number",
+   "fieldtype": "Data",
+   "label": "Device Number"
+  },
+  {
+   "description": "Override auto-cancel minutes for this machine; leave 0 to use Pinelabs Settings value",
+   "fieldname": "auto_cancel_duration_in_minutes",
+   "fieldtype": "Int",
+   "label": "Auto Cancel (Minutes) Override",
+   "non_negative": 1
+  },
+  {
+   "default": "0",
+   "description": "Enable this machine configuration",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Enabled"
+  },
+  {
+   "default": "0",
+   "description": "Default machine used when no warehouse/user routing applies. Exactly one machine should have this set.",
+   "fieldname": "is_default",
+   "fieldtype": "Check",
+   "in_list_view": 1,
+   "label": "Is Default"
+  },
+  {
+   "description": "Optional description for this machine",
+   "fieldname": "description",
+   "fieldtype": "Small Text",
+   "label": "Description"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "istable": 1,
+ "links": [],
+ "modified": "2026-03-30 19:45:19.576369",
+ "modified_by": "Administrator",
+ "module": "Pinelabs Fin",
+ "name": "Pinelabs Machine Config",
+ "owner": "Administrator",
+ "permissions": [],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}

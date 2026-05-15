@@ -1,0 +1,197 @@
+{
+ "actions": [],
+ "allow_rename": 1,
+ "creation": "2026-03-30 19:22:49.130280",
+ "doctype": "DocType",
+ "engine": "InnoDB",
+ "field_order": [
+  "basic_setup_section",
+  "enabled",
+  "machine_configurations_section",
+  "machines",
+  "terminal_routing_mode",
+  "machine_mappings_section",
+  "machine_mappings",
+  "technical_section",
+  "api_endpoints",
+  "auto_cancel_duration_minutes",
+  "plural_section",
+  "enable_payment_links",
+  "plural_client_id",
+  "plural_client_secret",
+  "column_break_plural",
+  "payment_link_webhook_secret",
+  "plural_base_url",
+  "payment_link_expiry_minutes",
+  "last_sync",
+  "payable_documents_section",
+  "payable_doctypes"
+ ],
+ "fields": [
+  {
+   "fieldname": "basic_setup_section",
+   "fieldtype": "Section Break",
+   "label": "Basic Setup"
+  },
+  {
+   "default": "0",
+   "description": "Master switch for the Pine Labs integration.",
+   "fieldname": "enabled",
+   "fieldtype": "Check",
+   "label": "Enabled"
+  },
+  {
+   "fieldname": "machine_configurations_section",
+   "fieldtype": "Section Break",
+   "label": "Machines"
+  },
+  {
+   "description": "Configure Pine Labs machines with their credentials. Mark exactly one as Is Default.",
+   "fieldname": "machines",
+   "fieldtype": "Table",
+   "label": "Machines",
+   "options": "Pinelabs Machine Config"
+  },
+  {
+   "default": "Single Machine",
+   "description": "Single Machine: every transaction uses the row marked Is Default. Mapping: consults the Machine Mappings table below by context (user / warehouse / company / POS profile), falling back to Is Default when no mapping matches.",
+   "fieldname": "terminal_routing_mode",
+   "fieldtype": "Select",
+   "label": "Terminal Routing Mode",
+   "options": "Single Machine\nMapping",
+   "reqd": 1
+  },
+  {
+   "depends_on": "eval:doc.terminal_routing_mode == 'Mapping'",
+   "fieldname": "machine_mappings_section",
+   "fieldtype": "Section Break",
+   "label": "Machine Mappings"
+  },
+  {
+   "fieldname": "plural_section",
+   "fieldtype": "Section Break",
+   "label": "Plural API Configuration"
+  },
+  {
+   "default": "0",
+   "description": "Enable Plural payment-link generation. Required for the 'Send Payment Link' button.",
+   "fieldname": "enable_payment_links",
+   "fieldtype": "Check",
+   "label": "Enable Payment Links"
+  },
+  {
+   "depends_on": "enable_payment_links",
+   "description": "Provided by Pine Labs during merchant onboarding.",
+   "fieldname": "plural_client_id",
+   "fieldtype": "Data",
+   "label": "Plural Client ID",
+   "mandatory_depends_on": "enable_payment_links"
+  },
+  {
+   "depends_on": "enable_payment_links",
+   "description": "Keep this secret. Never share or expose it on the frontend.",
+   "fieldname": "plural_client_secret",
+   "fieldtype": "Password",
+   "label": "Plural Client Secret",
+   "mandatory_depends_on": "enable_payment_links"
+  },
+  {
+   "depends_on": "enable_payment_links",
+   "description": "Used to validate incoming webhook signatures from Pine Labs (x-verify header). Min 16 characters.",
+   "fieldname": "payment_link_webhook_secret",
+   "fieldtype": "Password",
+   "label": "Webhook Secret (HMAC)",
+   "mandatory_depends_on": "enable_payment_links"
+  },
+  {
+   "fieldname": "column_break_plural",
+   "fieldtype": "Column Break"
+  },
+  {
+   "depends_on": "enable_payment_links",
+   "description": "Plural API base URL. Sandbox: https://pluraluat.v2.pinepg.in | Production: https://api.pluralpay.in | Local simulator: http://127.0.0.1:5000. Auto-fills with the sandbox URL on save when left blank.",
+   "fieldname": "plural_base_url",
+   "fieldtype": "Data",
+   "label": "Plural API Base URL"
+  },
+  {
+   "default": "1440",
+   "depends_on": "enable_payment_links",
+   "description": "How long the generated payment link stays valid. Default 1440 minutes (24 hours). Must be > 0.",
+   "fieldname": "payment_link_expiry_minutes",
+   "fieldtype": "Int",
+   "label": "Payment Link Expiry (Minutes)"
+  },
+  {
+   "depends_on": "enable_payment_links",
+   "description": "Last webhook received timestamp.",
+   "fieldname": "last_sync",
+   "fieldtype": "Datetime",
+   "label": "Last Sync",
+   "read_only": 1
+  },
+  {
+   "description": "Routing rules used when Terminal Routing Mode is Mapping. Each row says: when context X matches (User / Warehouse / Company / POS Profile), route to machine Y. When more than one row matches, the alphabetically-first machine name wins.",
+   "fieldname": "machine_mappings",
+   "fieldtype": "Table",
+   "label": "Machine Mappings",
+   "options": "Pinelabs Machine Mapping"
+  },
+  {
+   "fieldname": "payable_documents_section",
+   "fieldtype": "Section Break",
+   "label": "Payable Documents"
+  },
+  {
+   "description": "Document types that show the Pine Labs payment buttons. Payment Entry is not allowed here.",
+   "fieldname": "payable_doctypes",
+   "fieldtype": "Table",
+   "label": "Payable Doctypes",
+   "options": "Pinelabs Payable Doctype"
+  },
+  {
+   "fieldname": "technical_section",
+   "fieldtype": "Section Break",
+   "label": "Technical"
+  },
+  {
+   "description": "Override Pine Labs API endpoints. Leave empty to use defaults.",
+   "fieldname": "api_endpoints",
+   "fieldtype": "Table",
+   "label": "API Endpoints",
+   "options": "Pinelabs API Endpoints"
+  },
+  {
+   "description": "Auto-cancel pending transactions after this many minutes. Default 3 if 0/empty.",
+   "fieldname": "auto_cancel_duration_minutes",
+   "fieldtype": "Int",
+   "label": "Auto Cancel Duration (Minutes)"
+  }
+ ],
+ "grid_page_length": 50,
+ "index_web_pages_for_search": 1,
+ "issingle": 1,
+ "links": [],
+ "modified": "2026-05-06 00:00:00.000000",
+ "modified_by": "Administrator",
+ "module": "Pinelabs Fin",
+ "name": "Pinelabs Settings",
+ "owner": "Administrator",
+ "permissions": [
+  {
+   "create": 1,
+   "delete": 1,
+   "email": 1,
+   "print": 1,
+   "read": 1,
+   "role": "System Manager",
+   "share": 1,
+   "write": 1
+  }
+ ],
+ "row_format": "Dynamic",
+ "rows_threshold_for_grid_search": 20,
+ "sort_field": "modified",
+ "sort_order": "DESC",
+ "states": []
+}
