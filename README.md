@@ -1,34 +1,10 @@
-<table width="100%" cellpadding="0" cellspacing="0" border="0"
-       style="width:100%; border-collapse:collapse; border:none;">
-
-<tr style="border:none;">
-
-    <!-- Left Logo -->
-    <td align="left" valign="middle"
-        style="padding:0; border:none !important; background:transparent;">
-        <img src="logos/finstein_logo.png"
-             alt="Finstein"
-             height="56"
-             style="display:block; border:none;">
-    </td>
-
-    <!-- Spacer -->
-    <td width="100%"
-        style="border:none !important; background:transparent;">
-    </td>
-
-    <!-- Right Logo -->
-    <td align="right" valign="middle"
-        style="padding:0; border:none !important; background:transparent;">
-        <img src="logos/frappe_logo.png"
-             alt="Frappe"
-             height="56"
-             style="display:block; border:none;">
-    </td>
-
+<table width="100%" border="0" cellspacing="0" cellpadding="0">
+<tr>
+<td align="left"><img src="logos/finstein_logo.png" alt="Finstein" height="56"></td>
+<td align="right"><img src="logos/frappe_logo.png" alt="Frappe" height="56"></td>
 </tr>
-
 </table>
+
 <div align="center" markdown="1">
 
 # Pinelabs Fin
