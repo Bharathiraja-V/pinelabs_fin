@@ -9,7 +9,11 @@ readme = "README.md"
 license = { file = "LICENSE" }
 dynamic = ["version"]
 dependencies = [
-    # "frappe~=15.0.0" # Installed and managed by bench.
+    # Bounded ranges required by Frappe Cloud's marketplace versioning rules.
+    # frappe + erpnext are installed/managed by bench; these declarations
+    # only pin the compatible major line (v15).
+    "frappe>=15.0.0-dev,<16.0.0",
+    "erpnext>=15.0.0-dev,<16.0.0",
 ]
 
 [build-system]
