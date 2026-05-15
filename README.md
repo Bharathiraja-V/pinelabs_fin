@@ -1,4 +1,4 @@
-<p align="center">
+<p>
   <img src="logos/finstein_logo.png" alt="Finstein" height="56">
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
   <img src="logos/frappe_logo.png" alt="Frappe" height="56">
