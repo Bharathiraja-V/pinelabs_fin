@@ -83,7 +83,7 @@ app_include_js = ["/assets/pinelabs_fin/js/pinelabs_buttons.js"]
 # ------------
 
 # before_install = "pinelabs_fin.install.before_install"
-# after_install = "pinelabs_fin.install.after_install"
+after_install = "pinelabs_fin.install.after_install"
 
 # Uninstallation
 # ------------
