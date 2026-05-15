@@ -1,8 +1,6 @@
-<p align="center">
-  <img src="logos/finstein_logo.png" alt="Finstein" height="56">
-  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="logos/frappe_logo.png" alt="Frappe" height="56">
-</p>
+<img src="logos/finstein_logo.png" alt="Finstein" height="40" align="left">
+<img src="logos/frappe_logo.png" alt="Frappe" height="56" align="right">
+<br clear="all">
 
 <div align="center" markdown="1">
 
