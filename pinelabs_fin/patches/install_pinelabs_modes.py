@@ -1,50 +1,20 @@
 # Copyright (c) 2026, Pinelabs Fin contributors
 # For license information, please see license.txt
 
-"""Install patch (idempotent).
+"""Seed the three canonical PineLabs Mode of Payment rows on UPGRADE.
 
-Seeds the three canonical PineLabs Mode of Payment rows:
+Fresh installs are handled by the ``after_install`` hook
+(``pinelabs_fin.install.after_install``) — on a clean ``install-app``
+Frappe records patches as already-run without executing them, so a
+patch alone would never seed the rows on a new site.
 
-- ``PineLabs - Card``         — terminal flow (physical device, card)
-- ``PineLabs - UPI``          — terminal flow (physical device, UPI)
-- ``PineLabs - Payment Link`` — Plural hosted link (one row covers every
-                                  method the customer can pick on Plural's
-                                  page: card / UPI / NB / wallet)
-
-The app identifies Pine Labs modes by **name** (see
-``PINELABS_TERMINAL_MODES`` and ``PINELABS_PLURAL_MODE`` in
-``api/transaction.py``). No custom fields are added to the standard
-ERPNext ``Mode of Payment`` doctype — the integration runs against a
-zero-customisation Mode of Payment.
-
-Each row needs a default account configured per company under
-``Mode of Payment → Accounts`` before the first payment goes through;
-the initiate-time pre-flight in ``api/transaction.py`` enforces this
-and throws a clear error before the customer is asked to pay.
+This patch exists for sites that *upgrade* from an older version where
+the seed never ran. It delegates to the same idempotent function the
+install hook uses, so there's a single source of truth.
 """
 
-import frappe
-
-SEED_MODES = [
-	{"mode_of_payment": "PineLabs - Card", "type": "Bank"},
-	{"mode_of_payment": "PineLabs - UPI", "type": "Bank"},
-	{"mode_of_payment": "PineLabs - Payment Link", "type": "Bank"},
-]
+from pinelabs_fin.install import seed_pinelabs_modes_of_payment
 
 
 def execute():
-	for entry in SEED_MODES:
-		_ensure_mode(entry)
-	frappe.db.commit()
-
-
-def _ensure_mode(entry):
-	"""Create the Mode of Payment row if missing. Idempotent."""
-	name = entry["mode_of_payment"]
-	if frappe.db.exists("Mode of Payment", name):
-		return
-	doc = frappe.new_doc("Mode of Payment")
-	doc.mode_of_payment = name
-	doc.type = entry["type"]
-	doc.enabled = 1
-	doc.insert(ignore_permissions=True)
+	seed_pinelabs_modes_of_payment()
