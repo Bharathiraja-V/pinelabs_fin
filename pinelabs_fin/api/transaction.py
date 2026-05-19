@@ -289,7 +289,13 @@ def mark_success(transaction, *, payment_id, payment_method=None, response_paylo
 		transaction.status = "SUCCESS"
 		transaction.flags.pinelabs_internal_transition = True
 		transaction.save(ignore_permissions=True)
-		frappe.db.commit()
+		# Durability boundary: the customer has ALREADY been charged by Pine
+		# Labs at this point. The PE + status flip must survive even if a
+		# later step in the same request (or the caller — webhook/cron) errors
+		# out; otherwise the money is taken but the transaction looks unpaid.
+		# The savepoint above scopes a clean rollback if PE creation itself
+		# fails, so this commit only persists a fully consistent SUCCESS state.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	except Exception:
 		frappe.db.rollback(save_point=savepoint)
 		frappe.log_error(

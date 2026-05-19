@@ -217,7 +217,11 @@ def reconcile_pending_plural_payments() -> None:
 	for row in rows:
 		try:
 			refresh_payment_link_status(row.name)
-			frappe.db.commit()
+			# Per-row commit in a batch cron: a successfully reconciled
+			# transaction must be durable before moving to the next row, so
+			# one bad row's rollback (in the except below) can't undo the
+			# rows already finalized in this run.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		except Exception:
 			frappe.db.rollback()
 			frappe.log_error(
@@ -347,14 +351,14 @@ def _get_customer_details(doc):
 	first_name = name.split(" ")[0] if name else "Customer"
 
 	if mobile:
-		digits = "".join(filter(str.isdigit, mobile))
+		digits = "".join(c for c in mobile if c.isdigit())
 		if len(digits) > 10 and digits.startswith("91"):
 			digits = digits[-10:]
 		elif len(digits) > 10:
 			digits = digits[-10:]
 		mobile = digits
 
-	country_code = "".join(filter(str.isdigit, str(country_code))) or _DEFAULT_COUNTRY_CODE
+	country_code = "".join(c for c in str(country_code) if c.isdigit()) or _DEFAULT_COUNTRY_CODE
 
 	return {
 		"email_id": email,

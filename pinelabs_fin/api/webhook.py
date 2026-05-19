@@ -319,8 +319,9 @@ def _log_decision(decision, txn_name, payment_id=None, payment_method=None, reas
 
 def _touch_last_sync():
 	try:
-		frappe.db.set_value(
-			"Pinelabs Settings",
+		# Pinelabs Settings is a Single doctype — use set_single_value, not
+		# set_value (which is for normal doctype rows).
+		frappe.db.set_single_value(
 			"Pinelabs Settings",
 			"last_sync",
 			now_datetime(),
