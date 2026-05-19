@@ -77,23 +77,33 @@ frappe.pinelabs = frappe.pinelabs || {};
 	// Async refresh from server — captures custom doctypes the user added.
 	frappe.after_ajax(refresh_payable_list);
 
+	// The deprecated current-form global is the only handle to a form that
+	// is ALREADY on screen when this desk-wide script initialises (before
+	// any form 'refresh' fires). It's wrapped once here so the rest of the
+	// file never touches that global directly.
+	function open_form() {
+		return window.cur_frm || null; // nosemgrep: frappe-cur-frm-usage
+	}
+
+	function render_if_payable(frm, log_label) {
+		if (frm && PAYABLE.flags.has(frm.doctype)) {
+			if (log_label) LOG(log_label, frm.doctype);
+			render_pinelabs_buttons(frm);
+		}
+	}
+
 	// Also re-render on route change (helps if the JS loaded after the
 	// initial form render — opening another doc and coming back works).
 	if (frappe.router && frappe.router.on) {
 		frappe.router.on("change", () => {
-			if (cur_frm && PAYABLE.flags.has(cur_frm.doctype)) {
-				render_pinelabs_buttons(cur_frm);
-			}
+			render_if_payable(open_form());
 		});
 	}
 
 	// Belt-and-braces: if a form is already on screen when this script
 	// runs, render against it immediately.
 	$(document).ready(() => {
-		if (cur_frm && PAYABLE.flags.has(cur_frm.doctype)) {
-			LOG("rendering buttons for current form on doc-ready", cur_frm.doctype);
-			render_pinelabs_buttons(cur_frm);
-		}
+		render_if_payable(open_form(), "rendering buttons for current form on doc-ready");
 	});
 
 	function register_handler(doctype) {
@@ -135,9 +145,7 @@ frappe.pinelabs = frappe.pinelabs || {};
 				});
 
 				// If the current form just became payable, render now.
-				if (cur_frm && PAYABLE.flags.has(cur_frm.doctype)) {
-					render_pinelabs_buttons(cur_frm);
-				}
+				render_if_payable(open_form());
 			})
 			.catch((err) => {
 				console.error("[Pinelabs] failed to fetch Pinelabs Settings:", err);

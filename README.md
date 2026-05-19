@@ -1,6 +1,8 @@
-<img src="logos/finstein_logo.png" alt="Finstein" height="42" align="left">
-<img src="logos/frappe_logo.png" alt="Frappe" height="52" align="right">
-<br clear="all">
+
+<div style="display: flex; justify-content: space-between; margin-bottom: 20px;">
+    <img src="logos/finstein_logo.png" alt="Finstein" height="45">
+    <img src="logos/frappe_logo.png" alt="Frappe" height="52" align="right" >
+</div>
 
 <div align="center" markdown="1">
 
@@ -45,27 +47,11 @@ Pine Labs payment integration for Frappe & ERPNext — take terminal payments or
 
 ---
 
-## How to Install
+## Installation
 
-```bash
-cd ~/frappe-bench
-bench get-app https://github.com/<owner>/pinelabs_fin
-bench --site <your-site> install-app pinelabs_fin
-bench --site <your-site> migrate
-bench build
-bench restart
-```
+Install **Pinelabs Fin** directly from the Frappe Marketplace onto your site — no command-line steps required. On a fresh install the three Pine Labs Modes of Payment are seeded automatically; migrations are idempotent and re-run safely on every upgrade.
 
-Upgrade later:
-
-```bash
-cd ~/frappe-bench/apps/pinelabs_fin
-git pull
-cd ~/frappe-bench
-bench --site <your-site> migrate
-```
-
-Migrations are idempotent — `bench migrate` is safe to run any number of times.
+Self-hosting on your own bench instead? Full bench-level installation and first-time configuration steps are in the [setup guide](guide.md).
 
 ---
 
