@@ -105,30 +105,14 @@ def validate_finalization_ready(reference_doctype):
 
 	if cint(config.get("finalize_via_payment_entry", 1)):
 		frappe.throw(
-			_(
-				"Cannot accept Pine Labs payments on {0}: it is not Sales Invoice "
-				"/ POS Invoice / Payment Request, but its Payable Documents row "
-				"has 'Create Payment Entry' ticked. ERPNext's Payment Entry "
-				"builder does not support {0}, so finalization would fail after "
-				"the customer paid.\n\n"
-				"Fix: open the row in Pinelabs Settings → Payable Documents, "
-				"untick 'Create Payment Entry', and set 'Status Field' + 'Paid "
-				"Status Value'. Or delete the row entirely to use the permissive "
-				"path (Pinelabs Transaction records the payment; source doc is "
-				"left untouched)."
-			).format(reference_doctype),
+			_("Cannot accept Pine Labs payments on {0}: it is not Sales Invoice / POS Invoice / Payment Request, but its Payable Documents row has 'Create Payment Entry' ticked. ERPNext's Payment Entry builder does not support {0}, so finalization would fail after the customer paid. Fix: open the row in Pinelabs Settings → Payable Documents, untick 'Create Payment Entry', and set 'Status Field' + 'Paid Status Value'; or delete the row entirely to use the permissive path (Pinelabs Transaction records the payment; source doc is left untouched).").format(reference_doctype),
 		)
 
 	status_field = (config.get("status_field") or "").strip()
 	paid_value = (config.get("paid_status_value") or "").strip()
 	if not (status_field and paid_value):
 		frappe.throw(
-			_(
-				"Cannot accept Pine Labs payments on {0}: its Payable Documents "
-				"row has 'Create Payment Entry' unticked but is missing 'Status "
-				"Field' or 'Paid Status Value'. Fill both, or delete the row to "
-				"use the permissive path."
-			).format(reference_doctype),
+			_("Cannot accept Pine Labs payments on {0}: its Payable Documents row has 'Create Payment Entry' unticked but is missing 'Status Field' or 'Paid Status Value'. Fill both, or delete the row to use the permissive path.").format(reference_doctype),
 		)
 
 

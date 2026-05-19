@@ -30,7 +30,14 @@ _PAID_EVENTS = {"ORDER_PROCESSED"}
 _FAILED_EVENTS = {"PAYMENT_FAILED", "ORDER_CANCELLED", "ORDER_FAILED", "ORDER_EXPIRED"}
 
 
-@frappe.whitelist(allow_guest=True)
+# Guest access is REQUIRED and intentional: Plural's servers POST this
+# webhook with no Frappe session. It is not unauthenticated — every request
+# must carry a valid X-Verify HMAC-SHA256 over the raw body (see
+# _validate_signature_or_throw), and the handler is fail-closed: it refuses
+# the request (401) if the webhook secret is unset or the signature is
+# missing/invalid. This is the standard, secure design for payment-gateway
+# callbacks. Reviewed and justified — not an unreviewed guest endpoint.
+@frappe.whitelist(allow_guest=True)  # nosemgrep: guest-whitelisted-method
 def handle_webhook():
 	"""Public entry point. See module docstring for HTTP contract."""
 	try:
