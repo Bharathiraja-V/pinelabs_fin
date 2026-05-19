@@ -278,7 +278,7 @@ MIT — see [LICENSE](LICENSE).
 
 ---
 
-<p align="center"><strong>Built with Frappe&nbsp; · &nbsp;by Finstein</strong></p>
+<p align="center"><strong>Built with Frappe&nbsp; &nbsp;by Finstein</strong></p>
 
 <p align="center">
   <img src="logos/frappe_logo.png" alt="Frappe" height="32">
