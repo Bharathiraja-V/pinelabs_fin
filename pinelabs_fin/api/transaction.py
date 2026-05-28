@@ -349,17 +349,24 @@ def _publish_status_update(transaction):
 	the browser never sees a status the database hasn't durably persisted.
 	"""
 	try:
+		payload = {
+			"transaction_name": transaction.name,
+			"reference_doctype": transaction.reference_doctype,
+			"reference_name": transaction.reference_name,
+			"flow_type": transaction.flow_type,
+			"status": transaction.status,
+			"payment_id": transaction.payment_id,
+			"payment_entry": transaction.payment_entry,
+			"error_message": transaction.error_message,
+		}
+		frappe.logger("pinelabs").info(
+			f"[Pinelabs DEBUG] publish_realtime pinelabs_txn_update "
+			f"user={transaction.owner} session_user={frappe.session.user} "
+			f"payload={payload}"
+		)
 		frappe.publish_realtime(
 			event="pinelabs_txn_update",
-			message={
-				"transaction_name": transaction.name,
-				"reference_doctype": transaction.reference_doctype,
-				"reference_name": transaction.reference_name,
-				"status": transaction.status,
-				"payment_id": transaction.payment_id,
-				"payment_entry": transaction.payment_entry,
-				"error_message": transaction.error_message,
-			},
+			message=payload,
 			user=transaction.owner,
 			after_commit=True,
 		)

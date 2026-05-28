@@ -356,6 +356,236 @@ class TestRouting(unittest.TestCase):
 		self.assertEqual(machine.machine_name, "Routing Machine A")
 
 
+class TestTerminalEdgeCases(unittest.TestCase):
+	"""Pine Labs response edge cases — race windows, age-outs, hard fails."""
+
+	def setUp(self):
+		self._invoice = _make_test_invoice()
+		_ensure_default_machine()
+
+	def tearDown(self):
+		frappe.db.rollback()
+
+	def _create_pending_txn(self, plutus_ref="999"):
+		"""Drive a txn to PENDING via the normal initiate path (mocked)."""
+		from pinelabs_fin.api import terminal as terminal_module
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			return_value={
+				"success": True,
+				"data": {
+					"ResponseCode": 0,
+					"ResponseMessage": "ok",
+					"PlutusTransactionReferenceID": plutus_ref,
+				},
+			},
+		):
+			result = terminal_module.initiate_terminal_payment(
+				reference_doctype="Sales Invoice",
+				reference_name=self._invoice.name,
+				mode_of_payment="PineLabs - Card",
+			)
+		return frappe.get_doc("Pinelabs Transaction", result["transaction_name"])
+
+	def test_gap4_missing_plutus_ref_marks_failed(self):
+		"""Gap 4: ResponseCode 0 without PlutusTransactionReferenceID must hard-fail."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		fake = {
+			"success": True,
+			"data": {"ResponseCode": 0, "ResponseMessage": "OK"},  # no PlutusTransactionReferenceID
+		}
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			return_value=fake,
+		):
+			result = terminal_module.initiate_terminal_payment(
+				reference_doctype="Sales Invoice",
+				reference_name=self._invoice.name,
+				mode_of_payment="PineLabs - Card",
+			)
+
+		self.assertFalse(result["success"])
+		txn = frappe.get_doc("Pinelabs Transaction", result["transaction_name"])
+		self.assertEqual(txn.status, "FAILED")
+		self.assertIn("PlutusTransactionReferenceID", txn.error_message or "")
+
+	def test_gap1_2_age_out_catches_paid_race(self):
+		"""Gap 1+2: 1001 past cutoff → settlement detects customer paid → SUCCESS."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		txn = self._create_pending_txn(plutus_ref="888")
+
+		# First poll = 1001 (still waiting). Settlement final poll = 0 (paid in race).
+		status_responses = [
+			{"success": True, "data": {"ResponseCode": 1001, "ResponseMessage": "TXN UPLOADED"}},
+			{"success": True, "data": {
+				"ResponseCode": 0, "ResponseMessage": "APPROVED",
+				"PlutusTransactionReferenceID": "888",
+			}},
+		]
+
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			side_effect=status_responses,
+		), patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.cancel_raw",
+			return_value={"success": True, "data": {"ResponseCode": 0, "ResponseMessage": "CANCELLED"}},
+		), patch(
+			"pinelabs_fin.api.terminal._auto_cancel_minutes",
+			return_value=0,  # any positive age trips the cutoff
+		):
+			result = terminal_module.check_terminal_status(txn.name)
+
+		self.assertEqual(result["status"], "SUCCESS")
+		reloaded = frappe.get_doc("Pinelabs Transaction", txn.name)
+		self.assertEqual(reloaded.status, "SUCCESS")
+
+	def test_gap1_2_age_out_no_race_marks_failed(self):
+		"""Gap 1+2: 1001 past cutoff with no race → FAILED with 'Aged out' reason."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		txn = self._create_pending_txn(plutus_ref="777")
+
+		# First poll = 1001. Settlement final poll = 1 (declined / no race).
+		status_responses = [
+			{"success": True, "data": {"ResponseCode": 1001, "ResponseMessage": "TXN UPLOADED"}},
+			{"success": True, "data": {"ResponseCode": 1, "ResponseMessage": "Declined"}},
+		]
+
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			side_effect=status_responses,
+		), patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.cancel_raw",
+			return_value={"success": True, "data": {"ResponseCode": 0, "ResponseMessage": "CANCELLED"}},
+		), patch(
+			"pinelabs_fin.api.terminal._auto_cancel_minutes",
+			return_value=0,
+		):
+			result = terminal_module.check_terminal_status(txn.name)
+
+		self.assertEqual(result["status"], "FAILED")
+		reloaded = frappe.get_doc("Pinelabs Transaction", txn.name)
+		self.assertEqual(reloaded.status, "FAILED")
+		self.assertIn("Aged out", reloaded.error_message or "")
+
+	def test_gap3_cancel_rejected_but_customer_paid_marks_success(self):
+		"""Gap 3: cancel API rejects ('already processed') → verify poll → SUCCESS."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		txn = self._create_pending_txn(plutus_ref="666")
+
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.cancel_raw",
+			return_value={"success": True, "data": {
+				"ResponseCode": 1, "ResponseMessage": "Transaction already processed",
+			}},
+		), patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			return_value={"success": True, "data": {
+				"ResponseCode": 0, "ResponseMessage": "APPROVED",
+				"PlutusTransactionReferenceID": "666",
+			}},
+		):
+			result = terminal_module.cancel_terminal_payment(txn.name, reason="user")
+
+		self.assertEqual(result["status"], "SUCCESS")
+		reloaded = frappe.get_doc("Pinelabs Transaction", txn.name)
+		self.assertEqual(reloaded.status, "SUCCESS")
+
+	def test_gap3_cancel_rejected_and_not_paid_marks_cancelled(self):
+		"""Gap 3 fallback: cancel rejected + status also non-zero → CANCELLED (no payment dropped)."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		txn = self._create_pending_txn(plutus_ref="555")
+
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.cancel_raw",
+			return_value={"success": True, "data": {
+				"ResponseCode": 1, "ResponseMessage": "Cannot cancel",
+			}},
+		), patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			return_value={"success": True, "data": {
+				"ResponseCode": 1001, "ResponseMessage": "TXN UPLOADED",
+			}},
+		):
+			result = terminal_module.cancel_terminal_payment(txn.name, reason="user")
+
+		self.assertEqual(result["status"], "CANCELLED")
+		reloaded = frappe.get_doc("Pinelabs Transaction", txn.name)
+		self.assertEqual(reloaded.status, "CANCELLED")
+
+	def test_response_status_matches_db_after_initiate(self):
+		"""Regression: API response `status` must reflect the DB state, not
+		the pre-call state. Prior bug: `_shape` read txn.status BEFORE the
+		caller captured the reloaded txn from mark_*, so accepted txns
+		reported "INITIATED" instead of "PENDING"."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		# Accepted by Pine Labs → DB should be PENDING.
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			return_value={
+				"success": True,
+				"data": {
+					"ResponseCode": 0, "ResponseMessage": "ok",
+					"PlutusTransactionReferenceID": 333,
+				},
+			},
+		):
+			result = terminal_module.initiate_terminal_payment(
+				reference_doctype="Sales Invoice",
+				reference_name=self._invoice.name,
+				mode_of_payment="PineLabs - Card",
+			)
+		db_txn = frappe.get_doc("Pinelabs Transaction", result["transaction_name"])
+		self.assertEqual(result["status"], db_txn.status)
+		self.assertEqual(result["status"], "PENDING")
+
+	def test_response_status_matches_db_after_sync_decline(self):
+		"""Same regression: sync decline → response should say FAILED, not INITIATED."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			return_value={
+				"success": True,
+				"data": {"ResponseCode": 2, "ResponseMessage": "Declined"},
+			},
+		):
+			result = terminal_module.initiate_terminal_payment(
+				reference_doctype="Sales Invoice",
+				reference_name=self._invoice.name,
+				mode_of_payment="PineLabs - Card",
+			)
+		db_txn = frappe.get_doc("Pinelabs Transaction", result["transaction_name"])
+		self.assertEqual(result["status"], db_txn.status)
+		self.assertEqual(result["status"], "FAILED")
+
+	def test_gap5_network_error_message_propagated(self):
+		"""Gap 5: timeout/HTTP error during poll → captured error_message includes the reason."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		txn = self._create_pending_txn(plutus_ref="444")
+
+		# `_handle_request_exception` shape: success=False with the error text.
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			return_value={
+				"success": False,
+				"error": "Request timeout - Pine Labs server did not respond",
+				"data": {},
+				"status_code": 0,
+			},
+		):
+			terminal_module.check_terminal_status(txn.name)
+
+		reloaded = frappe.get_doc("Pinelabs Transaction", txn.name)
+		self.assertIn("Request timeout", reloaded.error_message or "")
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────────────────────────────────

@@ -114,6 +114,13 @@ class PineLabsClient:
 		if not self.base_url:
 			frappe.throw(_("Active API endpoint URL is not configured for machine '{0}'").format(machine_name))
 
+		# SSL verification per-endpoint. Default True (secure). UAT
+		# environments with self-signed certs can opt out by setting
+		# verify_ssl=0 on the active Pinelabs API Endpoint row. Falls back
+		# to True if the field isn't on the doctype yet.
+		endpoint_verify_ssl = getattr(active_endpoint, "verify_ssl", None)
+		self.verify_ssl = True if endpoint_verify_ssl is None else bool(cint(endpoint_verify_ssl))
+
 		# Store endpoint paths
 		self.upload_endpoint = (
 			getattr(active_endpoint, "upload_transaction_endpoint", None)
@@ -287,10 +294,10 @@ class PineLabsClient:
 		frappe.logger().info(f"Pine Labs API Request to {url}: {json.dumps(payload, indent=2)}")
 
 		try:
-			# SSL verification - can be configured per endpoint if needed
-			# For now, disable SSL verification (UAT servers often use self-signed certificates)
-			# In production, consider enabling SSL verification
-			verify_ssl = False
+			# SSL verification is per-endpoint (defaults to True). UAT
+			# environments with self-signed certs can opt out via the
+			# verify_ssl field on the active Pinelabs API Endpoint row.
+			verify_ssl = getattr(self, "verify_ssl", True)
 			response = requests.post(url, headers=headers, json=payload, timeout=30, verify=verify_ssl)
 			return self._parse_response(response)
 		except Exception as e:

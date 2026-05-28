@@ -15,6 +15,24 @@ State flow:
         ResponseCode 1/2  → mark_failed (rejected immediately)
     poll → mark_success | mark_pending | mark_failed
     cancel → mark_cancelled
+
+Response shape — every whitelisted method returns a dict with:
+    success           bool   — "we know the outcome", NOT "your action succeeded".
+                              True even for FAILED/declined states; only
+                              False when the call itself could not produce
+                              a definitive answer (e.g. missing payment_id
+                              on a poll). Callers should branch on `status`,
+                              not `success`, to decide what happened.
+    transaction_name  str    — the Pinelabs Transaction id (PLT-...).
+    status            str    — INITIATED | PENDING | SUCCESS | FAILED | CANCELLED.
+    response_code     int    — Pine Labs raw ResponseCode (may be None
+                              if no call was made, e.g. cancel of a txn
+                              with no payment_id).
+    message           str    — human-readable summary, falls back to
+                              Pine Labs ResponseMessage when available.
+
+The `status` reflects the txn AFTER the call — callers don't need to reload
+from the DB.
 """
 
 import frappe
@@ -133,7 +151,10 @@ def initiate_terminal_payment(
 	#   0    = accepted, terminal is now processing → PENDING
 	#   1, 2 = rejected synchronously → FAILED
 	if not response.get("success"):
-		txn_service.mark_failed(
+		# Capture the return value: mark_* rebind their local `transaction`
+		# via _lock_and_reload, so our outer `txn` would otherwise stay at
+		# the pre-transition status and _shape would return stale data.
+		txn = txn_service.mark_failed(
 			txn,
 			error_message=response.get("error") or _("Pine Labs API call failed"),
 			response_payload=response_data or response,
@@ -142,9 +163,25 @@ def initiate_terminal_payment(
 		return _shape(success=False, txn=txn, response_code=response_code, message=response.get("error"))
 
 	if response_code in (0, "0"):
+		# Pine Labs accepted the request but didn't return a
+		# PlutusTransactionReferenceID — we'd have nothing to poll/cancel with,
+		# so the txn would sit PENDING forever (the cron skips rows with no
+		# payment_id). Fail fast so the operator sees it.
+		if not plutus_ref_str:
+			error = _(
+				"Pine Labs accepted the transaction but returned no "
+				"PlutusTransactionReferenceID. Cannot track this txn."
+			)
+			txn = txn_service.mark_failed(
+				txn,
+				error_message=error,
+				response_payload=response_data,
+				request_payload=request_payload,
+			)
+			return _shape(success=False, txn=txn, response_code=response_code, message=error)
 		# Pass payment_id through mark_pending — the doc gets reloaded inside,
 		# so an in-memory `txn.payment_id = ...` here would be lost.
-		txn_service.mark_pending(
+		txn = txn_service.mark_pending(
 			txn,
 			payment_id=plutus_ref_str,
 			response_payload=response_data,
@@ -153,7 +190,7 @@ def initiate_terminal_payment(
 		return _shape(success=True, txn=txn, response_code=response_code, message=response_data.get("ResponseMessage"))
 
 	# Synchronous decline.
-	txn_service.mark_failed(
+	txn = txn_service.mark_failed(
 		txn,
 		error_message=response_data.get("ResponseMessage") or _("Terminal declined the request"),
 		response_payload=response_data,
@@ -222,6 +259,19 @@ def check_terminal_status(transaction_name: str, create_payment_entry: int | Non
 		txn.response_payload = frappe.as_json(response_data, indent=2)
 		txn.flags.pinelabs_internal_transition = True
 		txn.save(ignore_permissions=True)
+
+		# Safety net: terminal keeps reporting "still waiting" past our cutoff.
+		# Force a settlement (cancel + final poll) so the row doesn't sit
+		# PENDING forever.
+		age_minutes = _txn_age_minutes(txn)
+		cutoff = _auto_cancel_minutes(txn)
+		if age_minutes >= cutoff:
+			return _attempt_age_out_settlement(
+				txn,
+				response_code,
+				response_data,
+				response_data.get("ResponseMessage") or "Terminal still reporting TXN UPLOADED",
+			)
 		return {"success": True, "status": "PENDING", "response_code": response_code, "message": "Waiting on terminal"}
 
 	if response_code in (1, 2, "1", "2"):
@@ -230,9 +280,14 @@ def check_terminal_status(transaction_name: str, create_payment_entry: int | Non
 		return {"success": True, "status": "FAILED", "response_code": response_code, "message": message}
 
 	# Unknown response_code — Pine Labs returned something outside the documented
-	# set. Capture it on the txn for visibility AND age-out to FAILED so the row
-	# doesn't sit PENDING forever (and the cron doesn't loop on it forever).
-	unknown_msg = response_data.get("ResponseMessage") or "Unknown response code"
+	# set (or the underlying HTTP call failed and response_data is empty).
+	# Capture what we can on the txn for visibility AND age-out via the
+	# settlement helper so we don't lose a customer-paid race.
+	unknown_msg = (
+		response_data.get("ResponseMessage")
+		or response.get("error")  # propagate timeout/connection error text
+		or "Unknown response code"
+	)
 	txn = txn_service._lock_and_reload(txn)
 	if txn.status in ("SUCCESS", "FAILED", "CANCELLED"):
 		return {"success": True, "status": txn.status, "response_code": response_code, "message": "already finalized"}
@@ -246,14 +301,7 @@ def check_terminal_status(transaction_name: str, create_payment_entry: int | Non
 	age_minutes = _txn_age_minutes(txn)
 	cutoff = _auto_cancel_minutes(txn)
 	if age_minutes >= cutoff:
-		txn_service.mark_failed(
-			txn,
-			error_message=(
-				f"No terminal state after {cutoff} min. Last ResponseCode={response_code}: {unknown_msg}"
-			),
-			response_payload=response_data,
-		)
-		return {"success": True, "status": "FAILED", "response_code": response_code, "message": "Aged out"}
+		return _attempt_age_out_settlement(txn, response_code, response_data, unknown_msg)
 
 	return {
 		"success": True,
@@ -273,17 +321,61 @@ def cancel_terminal_payment(transaction_name: str, reason: str | None = None) ->
 	if txn.flow_type != "Terminal":
 		frappe.throw(_("Transaction {0} is not a Terminal transaction.").format(transaction_name))
 	if txn.status in ("SUCCESS", "FAILED", "CANCELLED"):
-		return {"success": True, "status": txn.status, "message": "Already terminal"}
+		return {
+			"success": True,
+			"transaction_name": txn.name,
+			"status": txn.status,
+			"response_code": None,
+			"message": "Already terminal",
+		}
 
 	server_message = None
+	cancel_response_code = None
 	if txn.payment_id:
 		client = get_pinelabs_client(machine_name=txn.machine)
 		response = client.cancel_raw(txn.payment_id)
 		response_data = response.get("data") or {}
 		server_message = response_data.get("ResponseMessage")
+		cancel_response_code = response_data.get("ResponseCode")
 
-	txn_service.mark_cancelled(txn, reason=reason or server_message or "user cancelled")
-	return {"success": True, "status": "CANCELLED", "message": server_message or "Cancelled"}
+	# If Pine Labs rejected the cancel (e.g. "transaction already processed"),
+	# the customer may have actually paid in the race window between user click
+	# and our cancel call. Poll status once before forcing CANCELLED — if the
+	# txn is APPROVED, mark SUCCESS so we don't drop a real payment.
+	if cancel_response_code is not None and cancel_response_code not in (0, "0"):
+		try:
+			status_client = get_pinelabs_client(machine_name=txn.machine)
+			status_response = status_client.get_status_raw(txn.payment_id)
+			status_data = status_response.get("data") or {}
+			status_code = status_data.get("ResponseCode")
+			if status_code in (0, "0"):
+				txn = txn_service.mark_success(
+					txn,
+					payment_id=txn.payment_id,
+					payment_method=txn.payment_method,
+					response_payload=status_data,
+				)
+				return {
+					"success": True,
+					"transaction_name": txn.name,
+					"status": "SUCCESS",
+					"response_code": status_code,
+					"message": _("Cancel rejected by gateway: customer already paid. Marked SUCCESS."),
+				}
+		except Exception:
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"Pinelabs cancel-time final status check failed for {transaction_name}",
+			)
+
+	txn = txn_service.mark_cancelled(txn, reason=reason or server_message or "user cancelled")
+	return {
+		"success": True,
+		"transaction_name": txn.name,
+		"status": "CANCELLED",
+		"response_code": cancel_response_code,
+		"message": server_message or "Cancelled",
+	}
 
 
 def reconcile_pending_terminal_payments() -> None:
@@ -332,6 +424,71 @@ def reconcile_pending_terminal_payments() -> None:
 # ──────────────────────────────────────────────────────────────────────────
 # Helpers
 # ──────────────────────────────────────────────────────────────────────────
+
+
+def _attempt_age_out_settlement(txn, last_response_code, last_response_data, last_msg):
+	"""Force a settlement when polling hasn't reached a definitive state.
+
+	Customer's tap may have raced our decision to give up. We:
+	  1. Cancel the terminal-side reservation so no further taps can land.
+	  2. Poll status one last time — if the customer paid in the race
+	     window, mark SUCCESS instead of FAILED.
+	  3. Otherwise, mark FAILED with the last-known reason.
+
+	Best-effort: cancel / final-poll failures don't block the FAILED
+	transition (we still need a terminal state).
+	"""
+	from pinelabs_fin.api import transaction as txn_service
+	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
+
+	if txn.payment_id:
+		# Stop the terminal from accepting further taps.
+		try:
+			cancel_client = get_pinelabs_client(machine_name=txn.machine)
+			cancel_client.cancel_raw(txn.payment_id)
+		except Exception:
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"Pinelabs age-out cancel failed for {txn.name}",
+			)
+
+		# Final status check — did the customer pay in the race window?
+		try:
+			status_client = get_pinelabs_client(machine_name=txn.machine)
+			final = status_client.get_status_raw(txn.payment_id)
+			final_data = final.get("data") or {}
+			final_code = final_data.get("ResponseCode")
+			if final_code in (0, "0"):
+				txn_service.mark_success(
+					txn,
+					payment_id=txn.payment_id,
+					payment_method=txn.payment_method,
+					response_payload=final_data,
+				)
+				return {
+					"success": True,
+					"status": "SUCCESS",
+					"response_code": final_code,
+					"message": "Approved (caught at age-out)",
+				}
+		except Exception:
+			frappe.log_error(
+				frappe.get_traceback(),
+				f"Pinelabs age-out final status check failed for {txn.name}",
+			)
+
+	# No SUCCESS race detected — mark FAILED with the last-known reason.
+	txn_service.mark_failed(
+		txn,
+		error_message=f"Aged out. Last ResponseCode={last_response_code}: {last_msg}",
+		response_payload=last_response_data,
+	)
+	return {
+		"success": True,
+		"status": "FAILED",
+		"response_code": last_response_code,
+		"message": "Aged out",
+	}
 
 
 def _load_eligible_source(reference_doctype, reference_name):
