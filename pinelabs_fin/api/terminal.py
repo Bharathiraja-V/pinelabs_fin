@@ -316,7 +316,11 @@ def reconcile_pending_terminal_payments() -> None:
 			continue
 		try:
 			check_terminal_status(row.name)
-			frappe.db.commit()
+			# Per-row commit in a batch cron: a successfully reconciled
+			# transaction must be durable before moving to the next row, so
+			# one bad row's rollback (in the except below) can't undo the
+			# rows already finalized in this run.
+			frappe.db.commit()  # nosemgrep: frappe-manual-commit
 		except Exception:
 			frappe.db.rollback()
 			frappe.log_error(

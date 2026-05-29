@@ -36,11 +36,12 @@ def seed_pinelabs_modes_of_payment():
 	"""Create the three canonical Mode of Payment rows. Idempotent.
 
 	Shared by ``after_install`` (fresh installs) and the
-	``install_pinelabs_modes`` patch (upgrades).
+	``install_pinelabs_modes`` patch (upgrades). No explicit commit —
+	both call sites run inside Frappe's own transaction, which is
+	committed by the framework when the hook / patch finishes.
 	"""
 	for entry in SEED_MODES:
 		_ensure_mode(entry)
-	frappe.db.commit()
 
 
 def _ensure_mode(entry):

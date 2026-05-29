@@ -105,30 +105,14 @@ def validate_finalization_ready(reference_doctype):
 
 	if cint(config.get("finalize_via_payment_entry", 1)):
 		frappe.throw(
-			_(
-				"Cannot accept Pine Labs payments on {0}: it is not Sales Invoice "
-				"/ POS Invoice / Payment Request, but its Payable Documents row "
-				"has 'Create Payment Entry' ticked. ERPNext's Payment Entry "
-				"builder does not support {0}, so finalization would fail after "
-				"the customer paid.\n\n"
-				"Fix: open the row in Pinelabs Settings → Payable Documents, "
-				"untick 'Create Payment Entry', and set 'Status Field' + 'Paid "
-				"Status Value'. Or delete the row entirely to use the permissive "
-				"path (Pinelabs Transaction records the payment; source doc is "
-				"left untouched)."
-			).format(reference_doctype),
+			_("Cannot accept Pine Labs payments on {0}: it is not Sales Invoice / POS Invoice / Payment Request, but its Payable Documents row has 'Create Payment Entry' ticked. ERPNext's Payment Entry builder does not support {0}, so finalization would fail after the customer paid. Fix: open the row in Pinelabs Settings → Payable Documents, untick 'Create Payment Entry', and set 'Status Field' + 'Paid Status Value'; or delete the row entirely to use the permissive path (Pinelabs Transaction records the payment; source doc is left untouched).").format(reference_doctype),
 		)
 
 	status_field = (config.get("status_field") or "").strip()
 	paid_value = (config.get("paid_status_value") or "").strip()
 	if not (status_field and paid_value):
 		frappe.throw(
-			_(
-				"Cannot accept Pine Labs payments on {0}: its Payable Documents "
-				"row has 'Create Payment Entry' unticked but is missing 'Status "
-				"Field' or 'Paid Status Value'. Fill both, or delete the row to "
-				"use the permissive path."
-			).format(reference_doctype),
+			_("Cannot accept Pine Labs payments on {0}: its Payable Documents row has 'Create Payment Entry' unticked but is missing 'Status Field' or 'Paid Status Value'. Fill both, or delete the row to use the permissive path.").format(reference_doctype),
 		)
 
 
@@ -289,7 +273,13 @@ def mark_success(transaction, *, payment_id, payment_method=None, response_paylo
 		transaction.status = "SUCCESS"
 		transaction.flags.pinelabs_internal_transition = True
 		transaction.save(ignore_permissions=True)
-		frappe.db.commit()
+		# Durability boundary: the customer has ALREADY been charged by Pine
+		# Labs at this point. The PE + status flip must survive even if a
+		# later step in the same request (or the caller — webhook/cron) errors
+		# out; otherwise the money is taken but the transaction looks unpaid.
+		# The savepoint above scopes a clean rollback if PE creation itself
+		# fails, so this commit only persists a fully consistent SUCCESS state.
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	except Exception:
 		frappe.db.rollback(save_point=savepoint)
 		frappe.log_error(
