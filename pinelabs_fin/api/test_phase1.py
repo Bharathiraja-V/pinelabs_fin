@@ -732,8 +732,12 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		browser."""
 		from pinelabs_fin.api import terminal as terminal_module
 
-		# Set up a FAILED txn against the standard test invoice.
-		original = self._create_pending_txn(plutus_ref="901")
+		# Unique plutus_refs per run — see test_retry_failed_terminal_payment_rejects_unknown_method
+		# for the same isolation reasoning.
+		base = int(frappe.generate_hash(length=10), 16) % (10 ** 7)
+		original_ref = str(base)
+		retry_ref = base + 1
+		original = self._create_pending_txn(plutus_ref=original_ref)
 		# Force it to FAILED so retry has something to recover from.
 		with patch(
 			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
@@ -755,7 +759,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 				"success": True,
 				"data": {
 					"ResponseCode": 0, "ResponseMessage": "ok",
-					"PlutusTransactionReferenceID": 902,
+					"PlutusTransactionReferenceID": retry_ref,
 				},
 			},
 		):
@@ -776,7 +780,13 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		error rather than silently issuing initiate with garbage."""
 		from pinelabs_fin.api import terminal as terminal_module
 
-		original = self._create_pending_txn(plutus_ref="903")
+		# Unique plutus_ref per run — _create_pending_txn → mark_pending →
+		# commits payment_id to the DB. tearDown's rollback can't revert
+		# committed rows, so a fixed ref would collide with prior runs
+		# (active-txn guard: "Two active transactions cannot share a
+		# provider id").
+		plutus_ref = int(frappe.generate_hash(length=10), 16) % (10 ** 8)
+		original = self._create_pending_txn(plutus_ref=str(plutus_ref))
 		# Stomp the payment_method to a value not in PINELABS_METHOD_TO_MODE.
 		# Use db_set to bypass the doctype's status state machine.
 		frappe.db.set_value("Pinelabs Transaction", original.name, "payment_method", "BITCOIN")
