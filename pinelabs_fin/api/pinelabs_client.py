@@ -114,6 +114,13 @@ class PineLabsClient:
 		if not self.base_url:
 			frappe.throw(_("Active API endpoint URL is not configured for machine '{0}'").format(machine_name))
 
+		# SSL verification per-endpoint. Default True (secure). UAT
+		# environments with self-signed certs can opt out by setting
+		# verify_ssl=0 on the active Pinelabs API Endpoint row. Falls back
+		# to True if the field isn't on the doctype yet.
+		endpoint_verify_ssl = getattr(active_endpoint, "verify_ssl", None)
+		self.verify_ssl = True if endpoint_verify_ssl is None else bool(cint(endpoint_verify_ssl))
+
 		# Store endpoint paths
 		self.upload_endpoint = (
 			getattr(active_endpoint, "upload_transaction_endpoint", None)
@@ -129,6 +136,14 @@ class PineLabsClient:
 			getattr(active_endpoint, "cancel_transaction_endpoint", None)
 			or getattr(active_endpoint, "cancel_endpoint", None)
 			or "/API/CloudBasedIntegration/V1/CancelTransaction"
+		)
+		# Optional — Force Cancel API (Pine Labs Cloud v1.36+). Used as a
+		# fallback when the regular cancel returns a non-zero ResponseCode
+		# (e.g. terminal stuck/frozen). If the field is blank or missing on
+		# the active endpoint, the fallback is disabled.
+		self.force_cancel_endpoint = (
+			getattr(active_endpoint, "force_cancel_transaction_endpoint", None)
+			or None
 		)
 
 		# Store credentials from machine
@@ -232,7 +247,13 @@ class PineLabsClient:
 					"mid": "MID",
 					"paymentmode": "PaymentMode",
 					"amount": "Amount",
-					"invoicenumber": "InvoiceNumber"
+					"invoicenumber": "InvoiceNumber",
+					# UPI-specific reconciliation fields. HostTxnID is the
+					# NPCI/bank reference; VPA is the customer's UPI ID.
+					# Both are needed when filing disputes or matching bank
+					# settlement reports.
+					"hosttxnid": "HostTxnID",
+					"vpa": "VPA",
 				}
 
 				mapped_key = tag_mapping.get(tag, tag.upper())
@@ -287,10 +308,10 @@ class PineLabsClient:
 		frappe.logger().info(f"Pine Labs API Request to {url}: {json.dumps(payload, indent=2)}")
 
 		try:
-			# SSL verification - can be configured per endpoint if needed
-			# For now, disable SSL verification (UAT servers often use self-signed certificates)
-			# In production, consider enabling SSL verification
-			verify_ssl = False
+			# SSL verification is per-endpoint (defaults to True). UAT
+			# environments with self-signed certs can opt out via the
+			# verify_ssl field on the active Pinelabs API Endpoint row.
+			verify_ssl = getattr(self, "verify_ssl", True)
 			response = requests.post(url, headers=headers, json=payload, timeout=30, verify=verify_ssl)
 			return self._parse_response(response)
 		except Exception as e:
@@ -413,6 +434,29 @@ class PineLabsClient:
 			"UserID": frappe.session.user,
 		}
 		response = self._make_request(self.cancel_endpoint, payload)
+		response["request_payload"] = payload
+		return response
+
+	def force_cancel_raw(self, plutus_ref_id):
+		"""Pure-HTTP wrapper around the ForceCancel API (Pine Labs Cloud v1.36+).
+
+		Used as a fallback by the age-out settlement helper when the regular
+		Cancel returns a non-zero ResponseCode — typically because the terminal
+		is stuck/frozen and won't accept a graceful cancel. Same request shape
+		as the regular cancel.
+
+		Returns ``None`` if no `force_cancel_endpoint` is configured on the
+		active Pinelabs API Endpoint row (the feature is opt-in).
+		"""
+		if not self.force_cancel_endpoint:
+			return None
+		payload = {
+			"MerchantID": self.merchant_id,
+			"SecurityToken": self.security_token,
+			"PlutusTransactionReferenceID": int(plutus_ref_id),
+			"UserID": frappe.session.user,
+		}
+		response = self._make_request(self.force_cancel_endpoint, payload)
 		response["request_payload"] = payload
 		return response
 

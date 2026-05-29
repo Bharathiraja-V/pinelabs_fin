@@ -96,9 +96,31 @@ function render_buttons(frm) {
 	}
 
 	if (flow === "Terminal" && (status === "INITIATED" || status === "PENDING")) {
+		// Open the locked "Waiting for terminal" dialog for THIS in-flight
+		// txn. Useful when the operator navigated away from the source-doc
+		// modal and wants to come back to a running payment. The dialog is
+		// idempotent — if another tab already has it open, this returns the
+		// same modal instead of stacking a duplicate.
+		frm.add_custom_button(
+			__("Watch Terminal"),
+			() => watch_terminal(frm),
+			__("Actions"),
+		);
 		frm.add_custom_button(
 			__("Cancel Terminal"),
 			() => cancel_terminal(frm),
+			__("Actions"),
+		);
+	}
+
+	if (flow === "Terminal" && status === "FAILED") {
+		// Re-initiate using the original source doc + mode_of_payment.
+		// Creates a NEW Pinelabs Transaction row — the FAILED one stays
+		// for audit. Pre-flight (eligibility, outstanding amount, active
+		// txn guard) is re-run by initiate_terminal_payment.
+		frm.add_custom_button(
+			__("Retry Terminal"),
+			() => retry_terminal(frm),
 			__("Actions"),
 		);
 	}
@@ -110,6 +132,77 @@ function render_buttons(frm) {
 			__("Actions"),
 		);
 	}
+}
+
+function watch_terminal(frm) {
+	// Defensive: the global pinelabs_buttons.js bundle exposes
+	// open_terminal_modal. If for any reason it isn't loaded on this page,
+	// fail loud rather than silent.
+	if (!(window.frappe && frappe.pinelabs && typeof frappe.pinelabs.open_terminal_modal === "function")) {
+		frappe.msgprint({
+			title: __("Cannot open dialog"),
+			message: __("The Pine Labs UI bundle is not loaded on this page."),
+			indicator: "red",
+		});
+		return;
+	}
+	frappe.pinelabs.open_terminal_modal(frm.doc.name, {
+		on_settled: () => frm.reload_doc(),
+		on_cancel: () => frm.reload_doc(),
+	});
+}
+
+// Map the stored payment_method back to the Mode of Payment name expected
+// by initiate_terminal_payment. Pine Labs only supports CARD/UPI for
+// terminal flows (see PINELABS_TERMINAL_MODES in transaction.py).
+const PAYMENT_METHOD_TO_MODE = {
+	CARD: "PineLabs - Card",
+	UPI: "PineLabs - UPI",
+};
+
+function retry_terminal(frm) {
+	const mode = PAYMENT_METHOD_TO_MODE[String(frm.doc.payment_method || "").toUpperCase()];
+	if (!mode) {
+		frappe.msgprint({
+			title: __("Cannot retry"),
+			message: __("This transaction has no recognised Mode of Payment ({0}). Use the source document's Pay on Machine button instead.",
+				[frm.doc.payment_method || "—"]),
+			indicator: "red",
+		});
+		return;
+	}
+	if (!frm.doc.reference_doctype || !frm.doc.reference_name) {
+		frappe.msgprint({
+			title: __("Cannot retry"),
+			message: __("This transaction has no source document reference."),
+			indicator: "red",
+		});
+		return;
+	}
+	frappe.confirm(
+		__("Retry terminal payment for {0} {1} using {2}?",
+			[frm.doc.reference_doctype, frm.doc.reference_name, mode]),
+		() => {
+			frappe.pinelabs.start_terminal_payment(
+				{
+					reference_doctype: frm.doc.reference_doctype,
+					reference_name: frm.doc.reference_name,
+					mode_of_payment: mode,
+				},
+				{
+					// New txn is created — navigate to it so the user can watch
+					// the dialog finalize on the right row.
+					on_settled: (_status, new_txn_name) => {
+						if (new_txn_name && new_txn_name !== frm.doc.name) {
+							frappe.set_route("Form", "Pinelabs Transaction", new_txn_name);
+						} else {
+							frm.reload_doc();
+						}
+					},
+				},
+			);
+		},
+	);
 }
 
 function refresh_plural_status(frm) {
