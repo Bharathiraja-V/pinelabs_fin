@@ -200,6 +200,59 @@ def initiate_terminal_payment(
 
 
 @frappe.whitelist()
+def poll_terminal_status(transaction_name: str, create_payment_entry: int | None = None) -> dict:
+	"""Same behaviour as :func:`check_terminal_status`, distinct method name.
+
+	The locked "Waiting for terminal" dialog's internal poll calls this
+	endpoint instead of ``check_terminal_status`` so a consumer-app
+	defensive shim that intercepts ``check_terminal_status`` by method
+	name (e.g. fin_pos's `pinelabs check_terminal_status polling
+	neutralized` browser-side wrapper) does NOT silently swallow our
+	polls. The shim was designed to prevent two browser-side pollers
+	racing on the same txn — but it also blocks our dialog from
+	driving state when the consumer's own poller is not running for the
+	current txn (e.g. after our Retry button creates a NEW txn that the
+	consumer's PaymentModal does not know about).
+
+	Race tolerance: when two pollers concurrently transition the same
+	Pinelabs Transaction, ``check_terminal_status`` may raise
+	``frappe.TimestampMismatchError`` from the inner ``transaction.save``.
+	We catch it here and return the row's current persisted state — the
+	first poller's mutation has already landed, so the second poller has
+	nothing to add.
+	"""
+	try:
+		return check_terminal_status(transaction_name, create_payment_entry)
+	except frappe.TimestampMismatchError:
+		# The other poller won the race — the row already reflects the
+		# latest state. Return the persisted snapshot so the dialog can
+		# react via realtime / its next poll instead of surfacing an error
+		# popup to the operator.
+		#
+		# frappe.throw queues the "Document has been modified…" popup to
+		# frappe.local.message_log BEFORE raising the exception, so simply
+		# catching the exception isn't enough to suppress the popup. Strip
+		# the specific entry so the dialog doesn't show a confusing error
+		# the operator can't act on — but leave any other queued messages
+		# intact (e.g. real validation errors the operator does need to see).
+		_strip_timestamp_mismatch_popup()
+		cached = (
+			frappe.db.get_value(
+				"Pinelabs Transaction",
+				transaction_name,
+				("status", "error_message"),
+				as_dict=True,
+			) or {}
+		)
+		return {
+			"success": True,
+			"status": cached.get("status") or "PENDING",
+			"response_code": None,
+			"message": cached.get("error_message") or "Poll raced; returned cached state.",
+		}
+
+
+@frappe.whitelist()
 def check_terminal_status(transaction_name: str, create_payment_entry: int | None = None) -> dict:
 	"""Poll Pine Labs for the latest terminal status of a transaction.
 
@@ -236,9 +289,15 @@ def check_terminal_status(transaction_name: str, create_payment_entry: int | Non
 	response_code = response_data.get("ResponseCode")
 
 	# ResponseCode mapping (GetCloudBasedTxnStatus):
-	#   0    = APPROVED
-	#   1001 = TXN UPLOADED (still pending)
-	#   1, 2 = DECLINED
+	#   0    = APPROVED                              → SUCCESS
+	#   1, 2 = DECLINED                              → FAILED
+	#   1001 = TXN UPLOADED (still pending)          → keep polling
+	#   1006 = NO RESPONSE FROM PLUTUS (timeout —    → FAILED
+	#          terminal didn't respond in time;
+	#          definitively dead)
+	#   1008 = TXN VOIDED (cancelled externally,     → CANCELLED
+	#          e.g. via the terminal UI or another
+	#          system call)
 	if response_code in (0, "0"):
 		txn_service.mark_success(
 			txn,
@@ -279,6 +338,22 @@ def check_terminal_status(transaction_name: str, create_payment_entry: int | Non
 		txn_service.mark_failed(txn, error_message=message, response_payload=response_data)
 		return {"success": True, "status": "FAILED", "response_code": response_code, "message": message}
 
+	if response_code in (1006, "1006"):
+		# Definitive timeout from Pine Labs — terminal didn't respond in time.
+		# Treat as FAILED immediately rather than waiting out the age-out
+		# cutoff: the gateway has already declared the transaction dead.
+		message = response_data.get("ResponseMessage") or _("Terminal timeout — no response from Pine Labs")
+		txn_service.mark_failed(txn, error_message=message, response_payload=response_data)
+		return {"success": True, "status": "FAILED", "response_code": response_code, "message": message}
+
+	if response_code in (1008, "1008"):
+		# Transaction was voided externally (cancelled at the terminal UI or
+		# by another system call). Reflect that as CANCELLED here so the
+		# dialog closes and the source doc reconciles properly.
+		message = response_data.get("ResponseMessage") or _("Transaction voided at terminal")
+		txn_service.mark_cancelled(txn, reason=message)
+		return {"success": True, "status": "CANCELLED", "response_code": response_code, "message": message}
+
 	# Unknown response_code — Pine Labs returned something outside the documented
 	# set (or the underlying HTTP call failed and response_data is empty).
 	# Capture what we can on the txn for visibility AND age-out via the
@@ -309,6 +384,48 @@ def check_terminal_status(transaction_name: str, create_payment_entry: int | Non
 		"response_code": response_code,
 		"message": unknown_msg,
 	}
+
+
+@frappe.whitelist()
+def retry_failed_terminal_payment(transaction_name: str) -> dict:
+	"""One-call retry of a previously failed Terminal payment.
+
+	Used by the dialog's Retry button. The browser would otherwise need two
+	round-trips (frappe.client.get_value to look up the source doc + payment
+	method, then initiate_terminal_payment) — that adds visible lag compared
+	to the first initiate. This endpoint reads the original txn's source
+	doc + payment method server-side and immediately re-runs
+	initiate_terminal_payment, so retry feels as snappy as the first attempt.
+
+	Returns the same 5-key envelope as initiate_terminal_payment.
+	"""
+	from pinelabs_fin.api.transaction import PINELABS_METHOD_TO_MODE
+
+	if not frappe.db.exists("Pinelabs Transaction", transaction_name):
+		frappe.throw(
+			_("Pinelabs Transaction {0} does not exist.").format(transaction_name),
+		)
+	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	if txn.flow_type != "Terminal":
+		frappe.throw(
+			_("Transaction {0} is not a Terminal transaction.").format(transaction_name),
+		)
+	if not (txn.reference_doctype and txn.reference_name):
+		frappe.throw(
+			_("Transaction {0} has no source document reference.").format(transaction_name),
+		)
+	mode_of_payment = PINELABS_METHOD_TO_MODE.get(str(txn.payment_method or "").upper())
+	if not mode_of_payment:
+		frappe.throw(
+			_("Transaction {0} has no recognised payment method ({1}).").format(
+				transaction_name, txn.payment_method or "—",
+			),
+		)
+	return initiate_terminal_payment(
+		reference_doctype=txn.reference_doctype,
+		reference_name=txn.reference_name,
+		mode_of_payment=mode_of_payment,
+	)
 
 
 @frappe.whitelist()
@@ -426,6 +543,40 @@ def reconcile_pending_terminal_payments() -> None:
 # ──────────────────────────────────────────────────────────────────────────
 
 
+def _strip_timestamp_mismatch_popup():
+	"""Remove Frappe's auto-queued 'Document has been modified…' popup from
+	``frappe.local.message_log`` so callers that gracefully recover from a
+	TimestampMismatchError don't leak a confusing error popup to the user.
+	Other queued messages are preserved.
+	"""
+	import json as _json
+	try:
+		log = list(getattr(frappe.local, "message_log", []) or [])
+	except Exception:
+		return
+	filtered = []
+	for entry in log:
+		try:
+			# Each entry is a JSON-stringified dict like
+			# {"message": "...", "title": "...", "raise_exception": 1, ...}
+			text = entry if isinstance(entry, str) else str(entry)
+			parsed = None
+			try:
+				parsed = _json.loads(text) if isinstance(entry, str) else entry
+			except Exception:
+				parsed = {"message": text}
+			msg = (parsed or {}).get("message") if isinstance(parsed, dict) else text
+			if msg and "Document has been modified after you have opened it" in str(msg):
+				continue
+		except Exception:
+			pass
+		filtered.append(entry)
+	try:
+		frappe.local.message_log = filtered
+	except Exception:
+		pass
+
+
 def _attempt_age_out_settlement(txn, last_response_code, last_response_data, last_msg):
 	"""Force a settlement when polling hasn't reached a definitive state.
 
@@ -442,10 +593,28 @@ def _attempt_age_out_settlement(txn, last_response_code, last_response_data, las
 	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
 
 	if txn.payment_id:
-		# Stop the terminal from accepting further taps.
+		# Stop the terminal from accepting further taps. If the regular
+		# Cancel returns a non-zero ResponseCode (terminal frozen, already
+		# processed, etc.), try the Force Cancel API as a fallback. Both
+		# are best-effort — failures here don't block the final-poll +
+		# state transition below.
 		try:
 			cancel_client = get_pinelabs_client(machine_name=txn.machine)
-			cancel_client.cancel_raw(txn.payment_id)
+			cancel_response = cancel_client.cancel_raw(txn.payment_id)
+			cancel_code = (cancel_response.get("data") or {}).get("ResponseCode")
+			if cancel_code not in (0, "0", None):
+				# Regular cancel was rejected — fall back to Force Cancel if
+				# the endpoint is configured. force_cancel_raw returns None
+				# (no-op) when the endpoint URL is blank on the Pinelabs API
+				# Endpoint row, keeping this safe for sites that haven't
+				# opted into the v1.36+ Force Cancel API.
+				try:
+					cancel_client.force_cancel_raw(txn.payment_id)
+				except Exception:
+					frappe.log_error(
+						frappe.get_traceback(),
+						f"Pinelabs age-out force-cancel failed for {txn.name}",
+					)
 		except Exception:
 			frappe.log_error(
 				frappe.get_traceback(),
@@ -497,16 +666,31 @@ def _load_eligible_source(reference_doctype, reference_name):
 	if not frappe.db.exists(reference_doctype, reference_name):
 		frappe.throw(_("{0} {1} does not exist.").format(reference_doctype, reference_name))
 	doc = frappe.get_doc(reference_doctype, reference_name)
-	if cint(getattr(doc, "docstatus", 0)) != 1:
-		frappe.throw(_("{0} {1} must be submitted to take a terminal payment.").format(reference_doctype, reference_name))
+	# Drafts are accepted: mark_success auto-submits the draft before creating
+	# the Payment Entry (see _create_payment_entry_idempotent). Cancelled docs
+	# are still rejected — they're immutable in Frappe, so we can't book a PE
+	# against them.
+	if cint(getattr(doc, "docstatus", 0)) == 2:
+		frappe.throw(
+			_("{0} {1} is cancelled; cannot take a terminal payment.").format(
+				reference_doctype, reference_name
+			),
+		)
 	return doc
 
 
 def _amount_for(source_doc):
-	# Outstanding amount for SI/POSI/Payment Request, fall back to grand_total.
-	for field in ("outstanding_amount", "grand_total", "amount"):
+	# Submitted docs with a real outstanding balance: that's authoritative.
+	# Drafts have outstanding_amount=0 (computed at submit), so for them we
+	# fall back to rounded_total / grand_total / amount so the customer is
+	# charged the correct figure even before the doc is submitted.
+	if cint(getattr(source_doc, "docstatus", 0)) == 1:
+		outstanding = getattr(source_doc, "outstanding_amount", None)
+		if outstanding is not None and flt(outstanding) > 0:
+			return flt(outstanding)
+	for field in ("rounded_total", "grand_total", "amount"):
 		val = getattr(source_doc, field, None)
-		if val is not None:
+		if val is not None and flt(val) > 0:
 			return flt(val)
 	return 0.0
 

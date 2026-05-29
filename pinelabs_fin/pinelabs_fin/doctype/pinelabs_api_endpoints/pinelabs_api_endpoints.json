@@ -12,6 +12,7 @@
   "upload_transaction_endpoint",
   "get_status_endpoint",
   "cancel_transaction_endpoint",
+  "force_cancel_transaction_endpoint",
   "is_active",
   "verify_ssl",
   "description"
@@ -66,6 +67,13 @@
    "reqd": 1
   },
   {
+   "default": "/API/CloudBasedIntegration/V1/ForceCancelTransaction",
+   "description": "Optional. Endpoint path for forcefully cancelling a stuck/frozen transaction. Used as a fallback when the regular Cancel returns a non-zero ResponseCode. Pine Labs Cloud v1.36+. Leave blank to disable the fallback.",
+   "fieldname": "force_cancel_transaction_endpoint",
+   "fieldtype": "Data",
+   "label": "Force Cancel Endpoint"
+  },
+  {
    "default": "0",
    "description": "Enable this endpoint",
    "fieldname": "is_active",
@@ -92,7 +100,7 @@
  "index_web_pages_for_search": 1,
  "istable": 1,
  "links": [],
- "modified": "2026-05-26 12:00:00.000000",
+ "modified": "2026-05-28 10:00:00.000000",
  "modified_by": "Administrator",
  "module": "Pinelabs Fin",
  "name": "Pinelabs API Endpoints",

@@ -137,6 +137,14 @@ class PineLabsClient:
 			or getattr(active_endpoint, "cancel_endpoint", None)
 			or "/API/CloudBasedIntegration/V1/CancelTransaction"
 		)
+		# Optional — Force Cancel API (Pine Labs Cloud v1.36+). Used as a
+		# fallback when the regular cancel returns a non-zero ResponseCode
+		# (e.g. terminal stuck/frozen). If the field is blank or missing on
+		# the active endpoint, the fallback is disabled.
+		self.force_cancel_endpoint = (
+			getattr(active_endpoint, "force_cancel_transaction_endpoint", None)
+			or None
+		)
 
 		# Store credentials from machine
 		self.merchant_id = machine.merchant_id
@@ -239,7 +247,13 @@ class PineLabsClient:
 					"mid": "MID",
 					"paymentmode": "PaymentMode",
 					"amount": "Amount",
-					"invoicenumber": "InvoiceNumber"
+					"invoicenumber": "InvoiceNumber",
+					# UPI-specific reconciliation fields. HostTxnID is the
+					# NPCI/bank reference; VPA is the customer's UPI ID.
+					# Both are needed when filing disputes or matching bank
+					# settlement reports.
+					"hosttxnid": "HostTxnID",
+					"vpa": "VPA",
 				}
 
 				mapped_key = tag_mapping.get(tag, tag.upper())
@@ -420,6 +434,29 @@ class PineLabsClient:
 			"UserID": frappe.session.user,
 		}
 		response = self._make_request(self.cancel_endpoint, payload)
+		response["request_payload"] = payload
+		return response
+
+	def force_cancel_raw(self, plutus_ref_id):
+		"""Pure-HTTP wrapper around the ForceCancel API (Pine Labs Cloud v1.36+).
+
+		Used as a fallback by the age-out settlement helper when the regular
+		Cancel returns a non-zero ResponseCode — typically because the terminal
+		is stuck/frozen and won't accept a graceful cancel. Same request shape
+		as the regular cancel.
+
+		Returns ``None`` if no `force_cancel_endpoint` is configured on the
+		active Pinelabs API Endpoint row (the feature is opt-in).
+		"""
+		if not self.force_cancel_endpoint:
+			return None
+		payload = {
+			"MerchantID": self.merchant_id,
+			"SecurityToken": self.security_token,
+			"PlutusTransactionReferenceID": int(plutus_ref_id),
+			"UserID": frappe.session.user,
+		}
+		response = self._make_request(self.force_cancel_endpoint, payload)
 		response["request_payload"] = payload
 		return response
 

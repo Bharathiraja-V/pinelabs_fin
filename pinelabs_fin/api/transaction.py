@@ -281,10 +281,20 @@ def mark_success(transaction, *, payment_id, payment_method=None, response_paylo
 		# fails, so this commit only persists a fully consistent SUCCESS state.
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 	except Exception:
-		frappe.db.rollback(save_point=savepoint)
+		# MariaDB auto-invalidates the savepoint when an inner statement
+		# fails (e.g. an Error Log insert tripping a length validation).
+		# In that case ROLLBACK TO SAVEPOINT itself raises
+		# "SAVEPOINT ... does not exist", masking the real error. Swallow
+		# that secondary failure — the outer try/except in the request
+		# handler will still see the original exception we're about to
+		# re-raise.
+		try:
+			frappe.db.rollback(save_point=savepoint)
+		except Exception:
+			pass
 		frappe.log_error(
-			frappe.get_traceback(),
-			f"Pinelabs mark_success failed for {transaction.name}",
+			title=f"Pinelabs mark_success failed for {transaction.name}",
+			message=frappe.get_traceback(),
 		)
 		raise
 
@@ -650,6 +660,21 @@ def _create_payment_entry_idempotent(transaction):
 			),
 		)
 
+	source = frappe.get_doc(transaction.reference_doctype, transaction.reference_name)
+
+	# Auto-submit drafts. The customer has paid — the corresponding
+	# Sales / POS Invoice now needs to be a real, submitted ledger row so a
+	# Payment Entry can attach to it. Drafts also report outstanding_amount=0
+	# which would falsely trip the conflict guard below. We submit inside
+	# mark_success's savepoint, so if anything downstream rolls back, the
+	# submission rolls back with it (no orphaned ledger rows).
+	if cint(getattr(source, "docstatus", 0)) == 0:
+		source.flags.ignore_permissions = True
+		source.submit()
+		# Refetch so outstanding_amount and friends reflect the post-submit
+		# state ERPNext just computed.
+		source = frappe.get_doc(transaction.reference_doctype, transaction.reference_name)
+
 	# Conflict guard — source doc already fully paid by something else?
 	#
 	# If a cashier (or any other path) recorded a Payment Entry manually
@@ -666,7 +691,6 @@ def _create_payment_entry_idempotent(transaction):
 	# payment_entry empty and error_message populated. The operator
 	# sees the conflict on the Pinelabs Transaction record and can do
 	# manual reconciliation.
-	source = frappe.get_doc(transaction.reference_doctype, transaction.reference_name)
 	outstanding = flt(getattr(source, "outstanding_amount", 0) or 0)
 	if outstanding <= 0:
 		conflict_msg = (
@@ -678,7 +702,14 @@ def _create_payment_entry_idempotent(transaction):
 			f"Refresh Status on this transaction."
 		)
 		transaction.error_message = _truncate_with_ellipsis(conflict_msg, 1000)
-		frappe.log_error(conflict_msg, "Pinelabs PE conflict")
+		# Frappe's log_error(title, message) auto-swaps args only when the
+		# title contains a newline (treats it as a traceback). Our
+		# conflict message is single-line and >140 chars, so without
+		# explicit kwargs it lands in the Title field and trips Error Log's
+		# length validation — which would otherwise propagate up and break
+		# mark_success's savepoint rollback (MariaDB invalidates the
+		# savepoint when an inner statement fails). Be explicit.
+		frappe.log_error(title="Pinelabs PE conflict", message=conflict_msg)
 		return None
 
 	pe = get_payment_entry(transaction.reference_doctype, transaction.reference_name)
@@ -956,12 +987,39 @@ def _lock_and_reload(transaction):
 	serializes them: the second caller blocks until the first commits, then
 	loads the doc with the new (terminal) status and the idempotency check
 	at the top of each transition returns early.
+
+	REPEATABLE-READ caveat: under MariaDB's default isolation, a regular
+	SELECT after the FOR UPDATE still reads from the transaction snapshot
+	(the view captured at the request's first SELECT). That snapshot pre-dates
+	the other writer's commit, so ``frappe.get_doc`` returns a doc with the
+	stale ``modified`` timestamp — and the subsequent ``save()`` fails the
+	optimistic-lock check ("Document has been modified after you have opened
+	it…"). To bypass the snapshot for the timestamp check, re-read
+	``modified`` with FOR UPDATE (which always reads the latest committed
+	version) and stamp it onto the doc. All non-timestamp columns are still
+	read from the snapshot, which is fine — the transition functions overwrite
+	the columns they care about and the save uses the corrected timestamp.
 	"""
 	name = transaction if isinstance(transaction, str) else transaction.name
-	# for_update=True issues SELECT … FOR UPDATE; the lock is released
-	# automatically when this request's transaction commits or rolls back.
-	frappe.db.get_value("Pinelabs Transaction", name, "name", for_update=True)
-	return frappe.get_doc("Pinelabs Transaction", name)
+	# Acquire the row lock + read the latest committed `modified` in one shot.
+	# `frappe.db.get_value(..., for_update=True)` does SELECT … FOR UPDATE and
+	# bypasses the REPEATABLE-READ snapshot — so the value here reflects what
+	# the DB actually has, not what our transaction's snapshot remembers.
+	latest_modified = frappe.db.get_value(
+		"Pinelabs Transaction", name, "modified", for_update=True,
+	)
+	doc = frappe.get_doc("Pinelabs Transaction", name)
+	# Override the snapshot's stale `modified` with the real latest one so
+	# Frappe's optimistic-lock check inside save() passes. The lock itself
+	# guarantees no other writer can advance `modified` further until we
+	# release it (at request commit).
+	if latest_modified is not None:
+		doc.modified = latest_modified
+		# Also keep the in-doc cached copy in sync — Frappe's check_if_latest
+		# reads doc.modified and compares against the DB; without updating
+		# this we'd still trip.
+		doc._original_modified = str(latest_modified)
+	return doc
 
 
 def _to_json_str(value):

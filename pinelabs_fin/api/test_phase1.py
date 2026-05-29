@@ -564,6 +564,355 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		self.assertEqual(result["status"], db_txn.status)
 		self.assertEqual(result["status"], "FAILED")
 
+	def test_draft_source_doc_accepted_and_auto_submitted_on_success(self):
+		"""Drafts (docstatus=0) are now accepted at initiate. On SUCCESS, the
+		source doc is auto-submitted before the Payment Entry is created."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		# Build a fresh DRAFT invoice (no submit) — same shape as _make_test_invoice
+		# but stops at insert().
+		draft = frappe.get_doc({
+			"doctype": "Sales Invoice",
+			"customer": "_Test Customer",
+			"company": "_Test Company",
+			"debit_to": "_Test Receivable - _TC",
+			"items": [{"item_code": "_Test Item", "qty": 1, "rate": 100}],
+			"due_date": frappe.utils.nowdate(),
+		})
+		draft.insert(ignore_permissions=True)
+		self.assertEqual(draft.docstatus, 0)
+
+		# Unique Plutus ref per run — mark_success commits the resulting PE
+		# (real-world durability requirement) and tearDown's rollback can't
+		# revert committed data. If we reused a fixed ref, the next run
+		# would find the previous PE via _create_payment_entry_idempotent's
+		# Rule-2 early return and short-circuit BEFORE the auto-submit step,
+		# making this assertion flaky.
+		plutus_ref = int(frappe.generate_hash(length=10), 16) % (10 ** 8)
+
+		# Initiate against the draft — must NOT throw "must be submitted".
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			return_value={
+				"success": True,
+				"data": {
+					"ResponseCode": 0, "ResponseMessage": "ok",
+					"PlutusTransactionReferenceID": plutus_ref,
+				},
+			},
+		):
+			result = terminal_module.initiate_terminal_payment(
+				reference_doctype="Sales Invoice",
+				reference_name=draft.name,
+				mode_of_payment="PineLabs - Card",
+				amount=100,
+			)
+		self.assertTrue(result["success"])
+		self.assertEqual(result["status"], "PENDING")
+
+		# Customer pays → poll returns APPROVED → mark_success kicks in.
+		# Auto-submit must promote the draft to docstatus=1 before PE creation.
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			return_value={
+				"success": True,
+				"data": {
+					"ResponseCode": 0, "ResponseMessage": "APPROVED",
+					"PlutusTransactionReferenceID": plutus_ref,
+				},
+			},
+		):
+			poll_result = terminal_module.check_terminal_status(result["transaction_name"])
+
+		self.assertEqual(poll_result["status"], "SUCCESS")
+		reloaded_invoice = frappe.get_doc("Sales Invoice", draft.name)
+		self.assertEqual(reloaded_invoice.docstatus, 1)  # auto-submitted ✓
+		txn = frappe.get_doc("Pinelabs Transaction", result["transaction_name"])
+		self.assertEqual(txn.status, "SUCCESS")
+		self.assertTrue(txn.payment_entry)  # PE was created against the now-submitted doc
+
+	def test_response_code_1006_timeout_marks_failed(self):
+		"""ResponseCode 1006 ('NO RESPONSE FROM PLUTUS' — Pine Labs definitive
+		timeout) must mark the txn FAILED immediately, not sit in the
+		unknown-code branch waiting for age-out."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		txn = self._create_pending_txn(plutus_ref="606")
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			return_value={
+				"success": True,
+				"data": {
+					"ResponseCode": 1006,
+					"ResponseMessage": "NO RESPONSE FROM PLUTUS",
+				},
+			},
+		):
+			result = terminal_module.check_terminal_status(txn.name)
+
+		self.assertEqual(result["status"], "FAILED")
+		self.assertEqual(result["response_code"], 1006)
+		reloaded = frappe.get_doc("Pinelabs Transaction", txn.name)
+		self.assertEqual(reloaded.status, "FAILED")
+		self.assertIn("NO RESPONSE FROM PLUTUS", reloaded.error_message or "")
+
+	def test_response_code_1008_voided_marks_cancelled(self):
+		"""ResponseCode 1008 ('TXN VOIDED' — cancelled at terminal UI or
+		via another system call) must transition the txn to CANCELLED so
+		the dialog closes and the source doc reconciles correctly."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		txn = self._create_pending_txn(plutus_ref="608")
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			return_value={
+				"success": True,
+				"data": {
+					"ResponseCode": 1008,
+					"ResponseMessage": "TXN VOIDED",
+				},
+			},
+		):
+			result = terminal_module.check_terminal_status(txn.name)
+
+		self.assertEqual(result["status"], "CANCELLED")
+		self.assertEqual(result["response_code"], 1008)
+		reloaded = frappe.get_doc("Pinelabs Transaction", txn.name)
+		self.assertEqual(reloaded.status, "CANCELLED")
+
+	def test_poll_terminal_status_delegates_to_check_terminal_status(self):
+		"""poll_terminal_status is a thin alias: the dialog's internal poll
+		hits it to bypass consumer-app shims that filter on the original
+		method name. Behaviour must be identical to check_terminal_status."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		txn = self._create_pending_txn(plutus_ref="811")
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			return_value={
+				"success": True,
+				"data": {
+					"ResponseCode": 0, "ResponseMessage": "APPROVED",
+					"PlutusTransactionReferenceID": 811,
+				},
+			},
+		):
+			result = terminal_module.poll_terminal_status(txn.name)
+
+		# Alias must produce identical outcome to check_terminal_status —
+		# SUCCESS, response_code=0, txn flipped in DB.
+		self.assertEqual(result["status"], "SUCCESS")
+		self.assertEqual(result["response_code"], 0)
+		reloaded = frappe.get_doc("Pinelabs Transaction", txn.name)
+		self.assertEqual(reloaded.status, "SUCCESS")
+
+	def test_poll_terminal_status_tolerates_concurrent_race(self):
+		"""TimestampMismatchError from a concurrent poll must not propagate
+		to the caller — the alias returns the DB-cached state instead so
+		the dialog doesn't surface an error popup to the operator."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		txn = self._create_pending_txn(plutus_ref="812")
+		# Simulate the inner check_terminal_status raising mid-save (another
+		# poller already committed the transition between our load and save).
+		with patch(
+			"pinelabs_fin.api.terminal.check_terminal_status",
+			side_effect=frappe.TimestampMismatchError("simulated race"),
+		):
+			result = terminal_module.poll_terminal_status(txn.name)
+
+		# Should NOT raise. Should return the persisted (pre-race) state.
+		self.assertTrue(result["success"])
+		self.assertIn(result["status"], ("PENDING", "INITIATED", "SUCCESS", "FAILED", "CANCELLED"))
+
+	def test_retry_failed_terminal_payment_single_round_trip(self):
+		"""retry_failed_terminal_payment should derive everything it needs
+		from the original txn's reference + payment_method and re-run
+		initiate_terminal_payment — no separate get_value lookup from the
+		browser."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		# Set up a FAILED txn against the standard test invoice.
+		original = self._create_pending_txn(plutus_ref="901")
+		# Force it to FAILED so retry has something to recover from.
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			return_value={
+				"success": True,
+				"data": {"ResponseCode": 1, "ResponseMessage": "Declined"},
+			},
+		):
+			terminal_module.check_terminal_status(original.name)
+		reloaded = frappe.get_doc("Pinelabs Transaction", original.name)
+		self.assertEqual(reloaded.status, "FAILED")
+
+		# Now retry — server-side lookup should pull
+		# reference_doctype/reference_name/payment_method from the original
+		# txn and forward to initiate_terminal_payment automatically.
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			return_value={
+				"success": True,
+				"data": {
+					"ResponseCode": 0, "ResponseMessage": "ok",
+					"PlutusTransactionReferenceID": 902,
+				},
+			},
+		):
+			result = terminal_module.retry_failed_terminal_payment(original.name)
+
+		self.assertTrue(result["success"])
+		self.assertEqual(result["status"], "PENDING")
+		# A NEW txn row must have been created — the original FAILED row
+		# is preserved.
+		self.assertNotEqual(result["transaction_name"], original.name)
+		new_txn = frappe.get_doc("Pinelabs Transaction", result["transaction_name"])
+		self.assertEqual(new_txn.reference_name, original.reference_name)
+		self.assertEqual(new_txn.payment_method, original.payment_method)
+
+	def test_retry_failed_terminal_payment_rejects_unknown_method(self):
+		"""If the original txn has an unrecognised payment_method (data
+		corruption / external tampering), retry must throw with a clear
+		error rather than silently issuing initiate with garbage."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		original = self._create_pending_txn(plutus_ref="903")
+		# Stomp the payment_method to a value not in PINELABS_METHOD_TO_MODE.
+		# Use db_set to bypass the doctype's status state machine.
+		frappe.db.set_value("Pinelabs Transaction", original.name, "payment_method", "BITCOIN")
+		frappe.db.commit()
+
+		with self.assertRaises(frappe.ValidationError) as cm:
+			terminal_module.retry_failed_terminal_payment(original.name)
+		self.assertIn("recognised payment method", str(cm.exception))
+
+	def test_cancelled_source_doc_still_rejected(self):
+		"""Cancelled docs (docstatus=2) are immutable in Frappe — initiate must
+		still refuse with a clear error."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		# Submit, then cancel the test invoice.
+		self._invoice.cancel()
+		self.assertEqual(frappe.get_doc("Sales Invoice", self._invoice.name).docstatus, 2)
+
+		with self.assertRaises(frappe.ValidationError) as cm:
+			terminal_module.initiate_terminal_payment(
+				reference_doctype="Sales Invoice",
+				reference_name=self._invoice.name,
+				mode_of_payment="PineLabs - Card",
+				amount=100,
+			)
+		self.assertIn("cancelled", str(cm.exception).lower())
+
+	def test_force_cancel_fallback_fires_when_regular_cancel_rejects(self):
+		"""Age-out path: regular cancel returns non-zero → force_cancel_raw must be
+		called as a fallback to stop a frozen terminal before the final-poll
+		settlement decision."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		txn = self._create_pending_txn(plutus_ref="222")
+
+		# Sequence Pine Labs will return:
+		#  1st poll (in check_terminal_status): 1001 → triggers age-out
+		#  inside _attempt_age_out_settlement:
+		#    cancel_raw → ResponseCode 1 (rejected) → fallback fires
+		#    force_cancel_raw → called (spy)
+		#    final get_status_raw → ResponseCode 1 (declined / no race) → mark FAILED
+		status_responses = [
+			{"success": True, "data": {"ResponseCode": 1001, "ResponseMessage": "TXN UPLOADED"}},
+			{"success": True, "data": {"ResponseCode": 1, "ResponseMessage": "Declined"}},
+		]
+
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			side_effect=status_responses,
+		), patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.cancel_raw",
+			return_value={"success": True, "data": {"ResponseCode": 1, "ResponseMessage": "Cannot cancel"}},
+		), patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.force_cancel_raw",
+			return_value={"success": True, "data": {"ResponseCode": 0, "ResponseMessage": "Force cancelled"}},
+		) as force_cancel_spy, patch(
+			"pinelabs_fin.api.terminal._auto_cancel_minutes",
+			return_value=0,
+		):
+			result = terminal_module.check_terminal_status(txn.name)
+
+		# Force Cancel must have been invoked exactly once (the fallback path).
+		self.assertEqual(force_cancel_spy.call_count, 1)
+		self.assertEqual(result["status"], "FAILED")
+		reloaded = frappe.get_doc("Pinelabs Transaction", txn.name)
+		self.assertEqual(reloaded.status, "FAILED")
+
+	def test_force_cancel_not_called_when_regular_cancel_succeeds(self):
+		"""Symmetry test: when cancel_raw returns 0, force_cancel_raw must NOT
+		be called (avoid two redundant network calls on the happy path)."""
+		from pinelabs_fin.api import terminal as terminal_module
+
+		txn = self._create_pending_txn(plutus_ref="111")
+
+		status_responses = [
+			{"success": True, "data": {"ResponseCode": 1001, "ResponseMessage": "TXN UPLOADED"}},
+			{"success": True, "data": {"ResponseCode": 1, "ResponseMessage": "Declined"}},
+		]
+
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			side_effect=status_responses,
+		), patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.cancel_raw",
+			return_value={"success": True, "data": {"ResponseCode": 0, "ResponseMessage": "Cancelled"}},
+		), patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.force_cancel_raw",
+			return_value={"success": True, "data": {"ResponseCode": 0}},
+		) as force_cancel_spy, patch(
+			"pinelabs_fin.api.terminal._auto_cancel_minutes",
+			return_value=0,
+		):
+			terminal_module.check_terminal_status(txn.name)
+
+		self.assertEqual(force_cancel_spy.call_count, 0)
+
+	def test_upi_reconciliation_fields_captured_on_success(self):
+		"""HostTxnID and VPA must land on the response_payload after parsing
+		so UPI reconciliation queries can read them as named keys."""
+		from pinelabs_fin.api import terminal as terminal_module
+		import json as _json
+
+		txn = self._create_pending_txn(plutus_ref="333")
+
+		approved_response = {
+			"success": True,
+			"data": {
+				"ResponseCode": 0,
+				"ResponseMessage": "APPROVED",
+				"PlutusTransactionReferenceID": 333,
+				"TransactionData": [
+					{"Tag": "PaymentMode", "Value": "UPI"},
+					{"Tag": "HostTxnID", "Value": "316524112233"},
+					{"Tag": "VPA", "Value": "customer@upi"},
+					{"Tag": "RRN", "Value": "611234567890"},
+				],
+				# _parse_response also merges flattened tags onto the response
+				# dict before we see it — simulate that here.
+				"HostTxnID": "316524112233",
+				"VPA": "customer@upi",
+				"RRN": "611234567890",
+			},
+		}
+
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			return_value=approved_response,
+		):
+			result = terminal_module.check_terminal_status(txn.name)
+
+		self.assertEqual(result["status"], "SUCCESS")
+		reloaded = frappe.get_doc("Pinelabs Transaction", txn.name)
+		payload = _json.loads(reloaded.response_payload)
+		self.assertEqual(payload.get("HostTxnID"), "316524112233")
+		self.assertEqual(payload.get("VPA"), "customer@upi")
+
 	def test_gap5_network_error_message_propagated(self):
 		"""Gap 5: timeout/HTTP error during poll → captured error_message includes the reason."""
 		from pinelabs_fin.api import terminal as terminal_module
