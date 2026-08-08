@@ -6,3 +6,9 @@ tags
 node_modules
 __pycache__
 
+
+# Playwright run artifacts — storageState.json holds a live Desk `sid`
+# session cookie; screenshots and results are per-run output.
+playwright_tests/storageState.json
+playwright_tests/results*.json
+playwright_tests/shot_*.png
