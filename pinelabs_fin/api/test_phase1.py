@@ -1504,10 +1504,33 @@ class TestTransactionReferenceField(unittest.TestCase):
 		self.invoice = _make_test_invoice()
 		_ensure_default_machine()
 		_set_settings(enabled=1, enable_payment_links=1)
+		# mark_success calls frappe.db.commit() (the customer is already
+		# charged, so the PE must be durable) — which also commits whatever
+		# this test did to the Pinelabs Settings single. tearDown's rollback
+		# cannot undo that, so snapshot the field we mutate and put it back
+		# explicitly. Without this the suite leaves a real reference field
+		# configured on the site and live payments start writing to it.
+		self._original_ref_field = frappe.db.get_value(
+			"Pinelabs Payable Doctype",
+			{"parent": "Pinelabs Settings", "doctype_name": "Sales Invoice"},
+			"link_payment_entry_field",
+		)
 
 	def tearDown(self):
 		frappe.db.rollback()
+		self._restore_ref_field()
 		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	def _restore_ref_field(self):
+		current = frappe.db.get_value(
+			"Pinelabs Payable Doctype",
+			{"parent": "Pinelabs Settings", "doctype_name": "Sales Invoice"},
+			"link_payment_entry_field",
+		)
+		if current == self._original_ref_field:
+			return
+		_set_payable_row("Sales Invoice", link_payment_entry_field=self._original_ref_field)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 	def _make_pending_txn(self, create_payment_entry=None):
 		from pinelabs_fin.api import transaction as txn_service
@@ -1609,3 +1632,201 @@ class TestTransactionReferenceField(unittest.TestCase):
 		settings = frappe.get_single("Pinelabs Settings")
 		row = next(r for r in settings.payable_doctypes if r.doctype_name == "Sales Invoice")
 		self.assertEqual(cint(row.finalize_via_payment_entry), 0)
+
+
+class TestAutoCancelResolution(unittest.TestCase):
+	"""The gateway timeout and the app-side age-out must never contradict.
+
+	Regression cover for three defects: the app-side lookup queried the
+	Pinelabs Machine Config child table by ``name`` (a random hash) using
+	``machine_name``, so it never matched; the app-side value never read the
+	Settings field at all; and three different hardcoded fallbacks (1 / 3 / 5)
+	were in play for one concept.
+	"""
+
+	MACHINE = "Test Machine"
+
+	def setUp(self):
+		_ensure_default_machine()
+		_ensure_named_machine(self.MACHINE)
+
+	def tearDown(self):
+		frappe.db.rollback()
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	@staticmethod
+	def _set_machine_override(minutes):
+		settings = frappe.get_single("Pinelabs Settings")
+		for m in settings.machines:
+			if m.machine_name == TestAutoCancelResolution.MACHINE:
+				m.auto_cancel_duration_in_minutes = minutes
+		settings.flags.ignore_mandatory = True
+		settings.save(ignore_permissions=True)
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	class _Txn:
+		def __init__(self, machine):
+			self.machine = machine
+
+	def test_default_when_nothing_configured(self):
+		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+			DEFAULT_AUTO_CANCEL_MINUTES,
+			resolve_auto_cancel_minutes,
+		)
+
+		self._set_machine_override(0)
+		_set_settings(auto_cancel_duration_minutes=0)
+		self.assertEqual(resolve_auto_cancel_minutes(self.MACHINE), DEFAULT_AUTO_CANCEL_MINUTES)
+
+	def test_settings_value_is_used(self):
+		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+			resolve_auto_cancel_minutes,
+		)
+
+		self._set_machine_override(0)
+		_set_settings(auto_cancel_duration_minutes=20)
+		self.assertEqual(resolve_auto_cancel_minutes(self.MACHINE), 20)
+
+	def test_machine_override_beats_settings(self):
+		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+			resolve_auto_cancel_minutes,
+		)
+
+		_set_settings(auto_cancel_duration_minutes=20)
+		self._set_machine_override(7)
+		self.assertEqual(resolve_auto_cancel_minutes(self.MACHINE), 7)
+
+	def test_machine_resolved_by_machine_name_not_row_name(self):
+		"""The core bug: Pinelabs Machine Config is a child table, so its
+		`name` is a hash. Looking it up by machine_name always returned None."""
+		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+			resolve_auto_cancel_minutes,
+		)
+
+		self._set_machine_override(9)
+		# The old lookup — by `name` — still finds nothing, proving the row is
+		# not addressable that way and the new resolution is doing real work.
+		self.assertIsNone(
+			frappe.db.get_value(
+				"Pinelabs Machine Config", self.MACHINE, "auto_cancel_duration_in_minutes"
+			)
+		)
+		self.assertEqual(resolve_auto_cancel_minutes(self.MACHINE), 9)
+
+	def test_app_cutoff_always_exceeds_gateway_timeout(self):
+		"""The invariant: the app must never give up before the terminal does.
+		Checked across the full range Pine Labs uses in its own examples."""
+		from pinelabs_fin.api import terminal
+		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+			resolve_auto_cancel_minutes,
+		)
+
+		for configured in (2, 5, 10, 20, 100, 120):
+			self._set_machine_override(configured)
+			gateway = resolve_auto_cancel_minutes(self.MACHINE)
+			app = terminal._auto_cancel_minutes(self._Txn(self.MACHINE))
+			self.assertEqual(gateway, configured)
+			self.assertGreater(
+				app, gateway,
+				f"app cutoff {app} must exceed gateway timeout {gateway}",
+			)
+
+	def test_client_and_age_out_read_the_same_number(self):
+		"""Both timers derive from one value — they cannot drift apart."""
+		from pinelabs_fin.api import terminal
+		from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
+
+		self._set_machine_override(11)
+		client = get_pinelabs_client(machine_name=self.MACHINE)
+		self.assertEqual(client.auto_cancel_duration, 11)
+		self.assertEqual(
+			terminal._auto_cancel_minutes(self._Txn(self.MACHINE)),
+			11 + terminal.AGE_OUT_GRACE_MINUTES,
+		)
+
+	def test_unknown_machine_falls_back_to_settings(self):
+		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+			resolve_auto_cancel_minutes,
+		)
+
+		_set_settings(auto_cancel_duration_minutes=15)
+		self.assertEqual(resolve_auto_cancel_minutes("No Such Machine"), 15)
+		self.assertEqual(resolve_auto_cancel_minutes(None), 15)
+
+
+class TestSecretRedaction(unittest.TestCase):
+	"""Gateway credentials must never reach a log file in cleartext."""
+
+	def test_masks_secret_keys_at_any_depth(self):
+		from pinelabs_fin.api.redact import MASK, redact
+
+		payload = {
+			"MerchantID": "1234",
+			"SecurityToken": "70D7509C-0A90-4938-A7F9-DB99B9B841D9",
+			"nested": {"client_secret": "sh-hh", "Authorization": "Bearer abc.def"},
+			"rows": [{"access_token": "tok"}, {"Amount": 15900}],
+		}
+		out = redact(payload)
+
+		self.assertEqual(out["MerchantID"], "1234")          # non-secrets survive
+		self.assertEqual(out["rows"][1]["Amount"], 15900)
+		self.assertEqual(out["SecurityToken"], MASK)
+		self.assertEqual(out["nested"]["client_secret"], MASK)
+		self.assertEqual(out["nested"]["Authorization"], MASK)
+		self.assertEqual(out["rows"][0]["access_token"], MASK)
+
+	def test_key_spelling_variants_are_caught(self):
+		from pinelabs_fin.api.redact import MASK, redact
+
+		for key in ("client_secret", "clientSecret", "Client-Secret", "SECURITYTOKEN", "x-verify"):
+			self.assertEqual(redact({key: "live"})[key], MASK, key)
+
+	def test_input_is_not_mutated(self):
+		from pinelabs_fin.api.redact import redact
+
+		original = {"SecurityToken": "live-token"}
+		redact(original)
+		self.assertEqual(original["SecurityToken"], "live-token")
+
+	def test_upload_payload_log_line_carries_no_token(self):
+		"""End-to-end: the actual logged string for a real upload payload."""
+		import json as _json
+
+		from pinelabs_fin.api.redact import redact
+
+		_ensure_default_machine()
+		_ensure_named_machine("Test Machine")
+		from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
+
+		client = get_pinelabs_client(machine_name="Test Machine")
+		payload = client._build_transaction_payload(
+			transaction_ref="PLT-TEST-1", amount=100, payment_mode="Card"
+		)
+		self.assertEqual(payload["SecurityToken"], client.security_token)
+		logged = _json.dumps(redact(payload), indent=2)
+		self.assertNotIn(str(client.security_token), logged)
+		self.assertIn("REDACTED", logged)
+
+
+def _ensure_named_machine(machine_name):
+	"""Append an enabled, NON-default machine row if it isn't there already.
+
+	_ensure_default_machine() only seeds a machine when the table is empty, so
+	on a site that already has one (every real site) it is a no-op. Tests that
+	need to address a machine by name have to add their own. is_default stays
+	0 so the "exactly one default machine" validation keeps passing.
+	"""
+	settings = frappe.get_single("Pinelabs Settings")
+	if not any(m.machine_name == machine_name for m in (settings.machines or [])):
+		settings.append("machines", {
+			"machine_name": machine_name,
+			"merchant_id": "MID-TEST",
+			"client_id": "CID-TEST",
+			"security_token": "ST-TEST-SECRET",
+			"store_id": "STORE-1",
+			"enabled": 1,
+			"is_default": 0,
+		})
+		settings.flags.ignore_mandatory = True
+		settings.save(ignore_permissions=True)
+	frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")

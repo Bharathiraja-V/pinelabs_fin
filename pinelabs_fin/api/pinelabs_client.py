@@ -30,6 +30,8 @@ import requests
 from frappe import _
 from frappe.utils import cint, now_datetime
 
+from pinelabs_fin.api.redact import redact
+
 
 class PineLabsClient:
 	"""
@@ -152,16 +154,14 @@ class PineLabsClient:
 		self.client_id = machine.client_id
 		self.store_id = machine.store_id
 		self.device_number = machine.device_number or ""
-		# Auto-cancel: per-machine override > Pinelabs Settings > default 3
-		machine_mins = getattr(machine, "auto_cancel_duration_in_minutes", None)
-		if machine_mins is not None and cint(machine_mins) > 0:
-			self.auto_cancel_duration = cint(machine_mins)
-		else:
-			settings_mins = getattr(self.settings, "auto_cancel_duration_minutes", None)
-			if settings_mins is not None and cint(settings_mins) > 0:
-				self.auto_cancel_duration = cint(settings_mins)
-			else:
-				self.auto_cancel_duration = 3
+		# Auto-cancel: per-machine override > Pinelabs Settings > default.
+		# Shared with terminal._auto_cancel_minutes so the gateway timer and
+		# the app-side age-out can never disagree — see resolve_auto_cancel_minutes.
+		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+			resolve_auto_cancel_minutes,
+		)
+
+		self.auto_cancel_duration = resolve_auto_cancel_minutes(machine.machine_name)
 
 		# Validate required credentials
 		if not all([self.merchant_id, self.security_token, self.client_id, self.store_id]):
@@ -315,7 +315,10 @@ class PineLabsClient:
 			Response dictionary
 		"""
 		url, headers = self._prepare_request(endpoint, payload)
-		frappe.logger().info(f"Pine Labs API Request to {url}: {json.dumps(payload, indent=2)}")
+		# Payload carries SecurityToken — mask before it hits the log file.
+		frappe.logger().info(
+			f"Pine Labs API Request to {url}: {json.dumps(redact(payload), indent=2)}"
+		)
 
 		try:
 			# SSL verification is per-endpoint (defaults to True). UAT

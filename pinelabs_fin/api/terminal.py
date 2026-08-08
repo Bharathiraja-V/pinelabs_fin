@@ -39,12 +39,12 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt, get_datetime, time_diff_in_seconds
 
-# When Pine Labs returns a non-standard ResponseCode for a terminal poll,
-# the txn would otherwise sit PENDING forever and the cron would loop on it.
-# After this many minutes with no movement, mark the txn FAILED so the
-# operator sees a terminal state. Overrideable per-machine via
-# Pinelabs Machine Config.auto_cancel_duration_in_minutes.
-_DEFAULT_AUTO_CANCEL_MINUTES = 5
+# Grace added to the gateway's own auto-cancel timeout to get the app-side
+# age-out (see _auto_cancel_minutes). The terminal cancels at its timeout and
+# the next poll observes that; the foreground dialog polls every ~3s and the
+# cron every 60s, so two minutes is ample headroom for the app to see a
+# gateway-side cancellation before deciding to force one itself.
+AGE_OUT_GRACE_MINUTES = 2
 
 
 @frappe.whitelist()
@@ -769,12 +769,24 @@ def _txn_age_minutes(txn) -> float:
 
 
 def _auto_cancel_minutes(txn) -> int:
-	"""Per-machine override for auto-cancel age (falls back to the default)."""
-	if not txn.machine:
-		return _DEFAULT_AUTO_CANCEL_MINUTES
-	minutes = frappe.db.get_value(
-		"Pinelabs Machine Config",
-		txn.machine,
-		"auto_cancel_duration_in_minutes",
+	"""How long the APP waits before force-settling a stuck transaction.
+
+	Always the gateway's own auto-cancel timeout plus a grace margin, never
+	an independent number. Pine Labs cancels the transaction at the terminal
+	after ``AutoCancelDurationInMinutes``; the next status poll then reports a
+	terminal state, so in the normal case the app never has to intervene at
+	all. The age-out exists only for when the gateway never returns a
+	definitive answer (unknown ResponseCode, or "TXN UPLOADED" forever).
+
+	Deriving it guarantees the invariant that matters: the app must never give
+	up while the terminal is still legitimately waiting for the customer.
+	Previously this was a hardcoded 5 minutes with a broken machine lookup, so
+	any configured value above 5 — including the 10 / 20 / 100 / 120 that Pine
+	Labs uses in its own documentation examples — made the app fire
+	``cancel`` + ``force_cancel`` mid-transaction.
+	"""
+	from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+		resolve_auto_cancel_minutes,
 	)
-	return cint(minutes) or _DEFAULT_AUTO_CANCEL_MINUTES
+
+	return resolve_auto_cancel_minutes(txn.machine) + AGE_OUT_GRACE_MINUTES

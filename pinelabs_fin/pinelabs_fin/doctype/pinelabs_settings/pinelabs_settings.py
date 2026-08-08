@@ -27,6 +27,13 @@ from frappe.model.document import Document
 from frappe.utils import cint
 
 _MIN_WEBHOOK_SECRET_LEN = 16
+
+# Auto-cancel duration sent to Pine Labs as ``AutoCancelDurationInMinutes``:
+# the gateway cancels the transaction at the terminal if the customer hasn't
+# paid within this many minutes. The field is Optional in the Cloud
+# Integration Guide with no documented min/max; Pine Labs' own examples use
+# 2, 5, 10, 20, 100 and 120. 3 matches the Settings field's description.
+DEFAULT_AUTO_CANCEL_MINUTES = 3
 # Watched fields — when any of these change, the Plural OAuth token cache must
 # be cleared so the next call fetches a fresh token against the new identity.
 _PLURAL_CACHE_BUSTING_FIELDS = (
@@ -192,6 +199,43 @@ class PinelabsSettings(Document):
 						doctype, label, ", ".join(missing)
 					),
 				)
+
+def resolve_auto_cancel_minutes(machine_name: str | None = None) -> int:
+	"""Return the gateway auto-cancel timeout for a machine, in minutes.
+
+	Resolution order: the machine's ``Auto Cancel (Minutes) Override`` →
+	``Pinelabs Settings.auto_cancel_duration_minutes`` → the default.
+
+	Single source of truth for BOTH timers that key off this number:
+
+	- ``pinelabs_client`` sends it to Pine Labs as
+	  ``AutoCancelDurationInMinutes`` (the terminal-side timer), and
+	- ``terminal._auto_cancel_minutes`` derives the app-side age-out from it.
+
+	Those two used to resolve independently and could contradict each other.
+	The app-side lookup also queried ``Pinelabs Machine Config`` by ``name``,
+	but that doctype is a child table whose ``name`` is a random hash while
+	``txn.machine`` stores ``machine_name`` — so it never matched and always
+	fell through to a hardcoded default. Machines are matched by
+	``machine_name`` here, the same way ``pinelabs_client._load_machine``
+	already did correctly.
+	"""
+	try:
+		settings = frappe.get_single("Pinelabs Settings")
+	except Exception:
+		return DEFAULT_AUTO_CANCEL_MINUTES
+
+	if machine_name:
+		for machine in (settings.machines or []):
+			if machine.machine_name != machine_name:
+				continue
+			override = cint(getattr(machine, "auto_cancel_duration_in_minutes", 0))
+			if override > 0:
+				return override
+			break
+
+	return cint(getattr(settings, "auto_cancel_duration_minutes", 0)) or DEFAULT_AUTO_CANCEL_MINUTES
+
 
 def get_default_machine_config() -> Document | None:
 	"""Return the default Pinelabs Machine Config row, or None if not configured."""
