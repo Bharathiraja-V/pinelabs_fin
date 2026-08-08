@@ -40,11 +40,20 @@ _FAILED_EVENTS = {"PAYMENT_FAILED", "ORDER_CANCELLED", "ORDER_FAILED", "ORDER_EX
 @frappe.whitelist(allow_guest=True)  # nosemgrep: guest-whitelisted-method
 def handle_webhook():
 	"""Public entry point. See module docstring for HTTP contract."""
+	original_user = frappe.session.user
+	event_row = None
 	try:
 		if frappe.request.method != "POST":
 			return _respond(405, "Only POST allowed")
 
 		_validate_signature_or_throw()
+
+		# The request is authenticated by the HMAC signature (fail-closed
+		# above), so process it as a trusted system caller. Finalization builds
+		# a Payment Entry, which reads the Account doctype — not permitted for
+		# the Guest user this allow_guest endpoint otherwise runs as. Elevate
+		# for the rest of the handler; restored in the finally below.
+		frappe.set_user("Administrator")
 
 		raw_body = frappe.request.get_data(as_text=True) or ""
 		try:
@@ -132,8 +141,15 @@ def handle_webhook():
 	except frappe.AuthenticationError as exc:
 		return _respond(401, str(exc))
 	except Exception as exc:
+		# Mark the claimed event 'failed' so it is visible AND — crucially — so
+		# the next delivery reprocesses it. The dedup only short-circuits on an
+		# event that reached a terminal 'processed'/'ignored' state, so a
+		# 'failed' (or 'received') row does NOT swallow the retry.
+		_finalize_event(event_row, status="failed")
 		frappe.log_error(frappe.get_traceback(), "Pinelabs Plural Webhook")
 		return _respond(500, str(exc))
+	finally:
+		frappe.set_user(original_user)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -198,11 +214,26 @@ def _resolve_event_id(envelope, payload, raw_body):
 	return "sha256:" + hashlib.sha256((raw_body or "").encode("utf-8")).hexdigest()
 
 
-def _claim_webhook_event(event_id, event_type, envelope):
-	"""Insert a Pinelabs Webhook Event row. Returns the doc, or None on duplicate.
+# Statuses that mean the event was already handled to completion — a genuine
+# duplicate delivery that must be ignored. A row still in 'received'/'failed'
+# was claimed but never finished (e.g. processing threw), so its redelivery
+# must be REPROCESSED, not swallowed.
+_TERMINAL_EVENT_STATUSES = ("processed", "ignored")
 
-	The UNIQUE constraint on event_id is the DB-level dedup guarantee — a
-	redelivery races and one insert wins, the other surfaces here as None.
+
+def _claim_webhook_event(event_id, event_type, envelope):
+	"""Claim (or resume) a Pinelabs Webhook Event row.
+
+	Returns:
+	  - a doc  → process it (a fresh claim, or an earlier attempt that did not
+	             finish and should be reprocessed);
+	  - None   → genuine duplicate of an already-completed event; skip.
+
+	The UNIQUE constraint on event_id is the DB-level dedup guarantee. On a
+	redelivery the second insert fails; we then look at the existing row's
+	status: only a terminally-processed event is a true duplicate. This stops a
+	failed first delivery (row left at 'received'/'failed') from swallowing its
+	own retry as a no-op.
 	"""
 	doc = frappe.new_doc("Pinelabs Webhook Event")
 	doc.event_id = event_id
@@ -217,13 +248,27 @@ def _claim_webhook_event(event_id, event_type, envelope):
 		doc.insert(ignore_permissions=True)
 		return doc
 	except frappe.DuplicateEntryError:
-		return None
+		return _resume_or_skip(event_id)
 	except Exception:
 		# DB-level dedup may also surface as a raw IntegrityError from the
 		# underlying driver depending on Frappe version — treat as duplicate.
 		if "duplicate" in (frappe.get_traceback() or "").lower():
-			return None
+			return _resume_or_skip(event_id)
 		raise
+
+
+def _resume_or_skip(event_id):
+	"""Given a duplicate event_id, return the existing row to reprocess (if it
+	never completed) or None to skip (if it already reached a terminal state).
+	"""
+	existing_name = frappe.db.get_value("Pinelabs Webhook Event", {"event_id": event_id}, "name")
+	if not existing_name:
+		# Racing insert not yet visible; safest to skip this delivery.
+		return None
+	existing = frappe.get_doc("Pinelabs Webhook Event", existing_name)
+	if existing.status in _TERMINAL_EVENT_STATUSES:
+		return None
+	return existing
 
 
 def _finalize_event(event_doc, *, status, pinelabs_transaction=None):

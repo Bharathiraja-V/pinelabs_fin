@@ -267,11 +267,21 @@ class PineLabsClient:
 		try:
 			response_data = response.json() if response.text else {}
 		except (ValueError, json.JSONDecodeError) as e:
+			# A 200 with an unreadable body (WAF/proxy HTML, maintenance page,
+			# truncated JSON) must NOT be reported as success — otherwise the
+			# caller sees success=True with no ResponseCode and treats a live
+			# terminal payment as a synchronous decline. Fail loudly instead.
 			frappe.logger().warning(
 				f"Failed to parse JSON response: {e!s}, "
 				f"Response text: {response.text[:500] if response.text else 'Empty'}"
 			)
-			response_data = {}
+			return {
+				"success": False,
+				"status_code": response.status_code,
+				"data": {},
+				"error": _("Unreadable response from Pine Labs (HTTP {0}).").format(response.status_code),
+				"raw_response": response.text,
+			}
 
 		# Extract values from TransactionData array if present
 		if "TransactionData" in response_data:
@@ -425,19 +435,35 @@ class PineLabsClient:
 		response["request_payload"] = payload
 		return response
 
-	def cancel_raw(self, plutus_ref_id):
-		"""Pure-HTTP wrapper around CancelTransaction."""
+	def _cancel_payload(self, plutus_ref_id, amount=None):
+		"""Build the CancelTransaction / ForceCancel request body.
+
+		Per the Pine Labs Cloud Integration Guide (v1.36/1.37) the cancel APIs
+		require the store identifier (ClientID/StoreID, same as upload/status)
+		and Amount (in paisa) — both Mandatory. Earlier versions of this client
+		omitted them, so the gateway could reject the cancel and leave the
+		terminal armed. ``amount`` is the transaction amount in rupees.
+		"""
 		payload = {
 			"MerchantID": self.merchant_id,
 			"SecurityToken": self.security_token,
+			"ClientID": self.client_id,
+			"StoreID": self.store_id,
 			"PlutusTransactionReferenceID": int(plutus_ref_id),
 			"UserID": frappe.session.user,
 		}
+		if amount is not None:
+			payload["Amount"] = int(float(amount) * 100)
+		return payload
+
+	def cancel_raw(self, plutus_ref_id, amount=None):
+		"""Pure-HTTP wrapper around CancelTransaction."""
+		payload = self._cancel_payload(plutus_ref_id, amount)
 		response = self._make_request(self.cancel_endpoint, payload)
 		response["request_payload"] = payload
 		return response
 
-	def force_cancel_raw(self, plutus_ref_id):
+	def force_cancel_raw(self, plutus_ref_id, amount=None):
 		"""Pure-HTTP wrapper around the ForceCancel API (Pine Labs Cloud v1.36+).
 
 		Used as a fallback by the age-out settlement helper when the regular
@@ -450,12 +476,7 @@ class PineLabsClient:
 		"""
 		if not self.force_cancel_endpoint:
 			return None
-		payload = {
-			"MerchantID": self.merchant_id,
-			"SecurityToken": self.security_token,
-			"PlutusTransactionReferenceID": int(plutus_ref_id),
-			"UserID": frappe.session.user,
-		}
+		payload = self._cancel_payload(plutus_ref_id, amount)
 		response = self._make_request(self.force_cancel_endpoint, payload)
 		response["request_payload"] = payload
 		return response

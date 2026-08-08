@@ -886,8 +886,9 @@ class TestTerminalEdgeCases(unittest.TestCase):
 	def test_upi_reconciliation_fields_captured_on_success(self):
 		"""HostTxnID and VPA must land on the response_payload after parsing
 		so UPI reconciliation queries can read them as named keys."""
-		from pinelabs_fin.api import terminal as terminal_module
 		import json as _json
+
+		from pinelabs_fin.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="333")
 
@@ -943,6 +944,124 @@ class TestTerminalEdgeCases(unittest.TestCase):
 
 		reloaded = frappe.get_doc("Pinelabs Transaction", txn.name)
 		self.assertIn("Request timeout", reloaded.error_message or "")
+
+
+class TestPluralMerchantReference(unittest.TestCase):
+	"""BUG-02: each Plural payment link uses the unique Pinelabs Transaction name
+	(PLT-...) as its merchant reference — never the invoice name — so two links
+	for the same invoice can be told apart on status refresh.
+	"""
+
+	def setUp(self):
+		self._invoice = _make_test_invoice()
+		# Maps the "PineLabs - Payment Link" Mode of Payment account so the
+		# initiate-time account pre-flight passes.
+		_ensure_default_machine()
+		# The Plural flow is now gated on both Settings switches (previously
+		# neither reached the API), so the fixture has to turn them on.
+		_set_settings(enabled=1, enable_payment_links=1)
+
+	def tearDown(self):
+		frappe.db.rollback()
+
+	@staticmethod
+	def _fake_create(ok=True, link_id="PLINK-1"):
+		if ok:
+			return {
+				"success": True,
+				"payment_link_url": "https://plural.example/pay/x",
+				"payment_link_id": link_id,
+				"raw": {},
+			}
+		return {"success": False, "error": "gateway boom", "raw": {}}
+
+	def test_payload_uses_txn_ref_and_keeps_invoice_in_description(self):
+		from pinelabs_fin.api.plural import _build_payment_link_payload
+
+		body = _build_payment_link_payload(
+			merchant_ref="PLT-2026-00042",
+			description_ref="ACC-SINV-2026-00001",
+			amount=100,
+			expiry_minutes=1440,
+			customer={},
+			allowed_methods=None,
+		)
+		self.assertEqual(body["merchant_payment_link_reference"], "PLT-2026-00042")
+		self.assertEqual(body["description"], "Payment for ACC-SINV-2026-00001")
+
+	def test_two_attempts_same_invoice_get_distinct_references(self):
+		from pinelabs_fin.api import plural
+
+		# First attempt fails at the gateway → txn goes FAILED, so the
+		# active-transaction guard allows a second attempt on the same invoice.
+		with patch(
+			"pinelabs_fin.api.plural_client.PluralClient.create_payment_link",
+			return_value=self._fake_create(ok=False),
+		):
+			r1 = plural.initiate_payment_link(
+				reference_doctype="Sales Invoice",
+				reference_name=self._invoice.name,
+				customer_email="buyer@example.com",
+				customer_mobile="9876543210",
+			)
+		self.assertFalse(r1["success"])
+
+		with patch(
+			"pinelabs_fin.api.plural_client.PluralClient.create_payment_link",
+			return_value=self._fake_create(ok=True, link_id="PLINK-2"),
+		):
+			r2 = plural.initiate_payment_link(
+				reference_doctype="Sales Invoice",
+				reference_name=self._invoice.name,
+				customer_email="buyer@example.com",
+				customer_mobile="9876543210",
+			)
+		self.assertTrue(r2["success"])
+
+		t1 = frappe.get_doc("Pinelabs Transaction", r1["transaction_name"])
+		t2 = frappe.get_doc("Pinelabs Transaction", r2["transaction_name"])
+		ref1 = json.loads(t1.request_payload)["merchant_payment_link_reference"]
+		ref2 = json.loads(t2.request_payload)["merchant_payment_link_reference"]
+
+		# Core of BUG-02: each reference is the txn's own name, they differ, and
+		# neither is the (shared) invoice name.
+		self.assertEqual(ref1, t1.name)
+		self.assertEqual(ref2, t2.name)
+		self.assertNotEqual(ref1, ref2)
+		self.assertNotEqual(ref1, self._invoice.name)
+		self.assertNotEqual(ref2, self._invoice.name)
+
+	def test_status_refresh_queries_by_txn_reference_not_invoice(self):
+		from pinelabs_fin.api import plural
+
+		with patch(
+			"pinelabs_fin.api.plural_client.PluralClient.create_payment_link",
+			return_value=self._fake_create(ok=True, link_id="PLINK-3"),
+		):
+			r = plural.initiate_payment_link(
+				reference_doctype="Sales Invoice",
+				reference_name=self._invoice.name,
+				customer_email="buyer@example.com",
+				customer_mobile="9876543210",
+			)
+		txn_name = r["transaction_name"]
+
+		captured = {}
+
+		def fake_status(merchant_ref):
+			captured["ref"] = merchant_ref
+			return {"success": True, "status": "PENDING", "data": {"status": "PENDING"}}
+
+		with patch(
+			"pinelabs_fin.api.plural_client.PluralClient.get_payment_link_status",
+			side_effect=fake_status,
+		):
+			plural.refresh_payment_link_status(txn_name)
+
+		# The status API must be queried by the reference we actually sent
+		# (the txn name), not the invoice name.
+		self.assertEqual(captured["ref"], txn_name)
+		self.assertNotEqual(captured["ref"], self._invoice.name)
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1048,3 +1167,52 @@ def _ensure_routing_machines():
 				m.is_default = 0
 		settings.flags.ignore_mandatory = True
 		settings.save(ignore_permissions=True)
+
+# ──────────────────────────────────────────────────────────────────────────
+# Settings gates + authorization (api/access.py)
+#
+# Every Pinelabs Settings switch used to be enforced ONLY in the browser, so
+# turning one off hid the button but left the whitelisted endpoint callable.
+# These tests pin each switch to a server-side refusal.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _StubDoc:
+	"""Minimal stand-in for a source document (attribute access only)."""
+
+	def __init__(self, **kwargs):
+		self.__dict__.update(kwargs)
+
+
+def _set_payable_row(doctype_name, **fields):
+	"""Set fields on the Payable Documents row for ``doctype_name``.
+
+	Rolled back by each test's tearDown.
+	"""
+	settings = frappe.get_single("Pinelabs Settings")
+	row = None
+	for candidate in (settings.payable_doctypes or []):
+		if candidate.doctype_name == doctype_name:
+			row = candidate
+			break
+	if row is None:
+		row = settings.append("payable_doctypes", {
+			"doctype_name": doctype_name,
+			"is_enabled": 1,
+			"amount_field": "outstanding_amount",
+		})
+	row.update(fields)
+	settings.flags.ignore_mandatory = True
+	settings.save(ignore_permissions=True)
+	frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+	return row
+
+
+def _set_settings(**fields):
+	settings = frappe.get_single("Pinelabs Settings")
+	settings.update(fields)
+	settings.flags.ignore_mandatory = True
+	settings.save(ignore_permissions=True)
+	frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+

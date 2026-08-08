@@ -96,8 +96,11 @@ def initiate_terminal_payment(
 	if resolved_amount <= 0:
 		frappe.throw(_("No outstanding amount on {0} {1}.").format(reference_doctype, reference_name))
 
-	# Don't start a second attempt while one is in flight.
-	existing = txn_service.get_active_for_doc(reference_doctype, reference_name)
+	# Serialize concurrent initiates on this source doc, then refuse a second
+	# attempt while one is in flight. The lock closes the check-then-act window
+	# so a double-click / double request can't create two charges.
+	txn_service.lock_source_for_initiate(reference_doctype, reference_name)
+	existing = txn_service.get_active_for_doc(reference_doctype, reference_name, for_update=True)
 	if existing:
 		frappe.throw(
 			_("A {0} payment ({1}) is already in progress for this document.").format(
@@ -450,7 +453,7 @@ def cancel_terminal_payment(transaction_name: str, reason: str | None = None) ->
 	cancel_response_code = None
 	if txn.payment_id:
 		client = get_pinelabs_client(machine_name=txn.machine)
-		response = client.cancel_raw(txn.payment_id)
+		response = client.cancel_raw(txn.payment_id, amount=txn.amount)
 		response_data = response.get("data") or {}
 		server_message = response_data.get("ResponseMessage")
 		cancel_response_code = response_data.get("ResponseCode")
@@ -600,7 +603,7 @@ def _attempt_age_out_settlement(txn, last_response_code, last_response_data, las
 		# state transition below.
 		try:
 			cancel_client = get_pinelabs_client(machine_name=txn.machine)
-			cancel_response = cancel_client.cancel_raw(txn.payment_id)
+			cancel_response = cancel_client.cancel_raw(txn.payment_id, amount=txn.amount)
 			cancel_code = (cancel_response.get("data") or {}).get("ResponseCode")
 			if cancel_code not in (0, "0", None):
 				# Regular cancel was rejected — fall back to Force Cancel if
@@ -609,7 +612,7 @@ def _attempt_age_out_settlement(txn, last_response_code, last_response_data, las
 				# Endpoint row, keeping this safe for sites that haven't
 				# opted into the v1.36+ Force Cancel API.
 				try:
-					cancel_client.force_cancel_raw(txn.payment_id)
+					cancel_client.force_cancel_raw(txn.payment_id, amount=txn.amount)
 				except Exception:
 					frappe.log_error(
 						frappe.get_traceback(),

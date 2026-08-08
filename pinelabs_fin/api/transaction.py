@@ -173,25 +173,50 @@ def create_transaction(
 	return doc
 
 
-def get_active_for_doc(reference_doctype, reference_name):
+def lock_source_for_initiate(reference_doctype, reference_name):
+	"""Row-lock the source document so concurrent initiate calls serialize.
+
+	``get_active_for_doc`` + ``create_transaction`` is a check-then-act with no
+	lock: two requests can both see "no active transaction" and both create one,
+	producing two charges for the same doc. Taking ``SELECT … FOR UPDATE`` on the
+	source doc row here (before the active-transaction check) forces the second
+	caller to block until the first commits; it then sees the first's active
+	transaction and is refused. Same ``for_update`` mechanism as
+	``_lock_and_reload``. No-op when the reference is incomplete.
+	"""
+	if reference_doctype and reference_name:
+		frappe.db.get_value(reference_doctype, reference_name, "name", for_update=True)
+
+
+def get_active_for_doc(reference_doctype, reference_name, for_update=False):
 	"""Return the open (INITIATED/PENDING) transaction for a source doc, or None.
 
 	Used by the JS button-handlers to detect "already in flight" before
 	starting a new attempt — prevents duplicate spends from rapid clicks.
+
+	``for_update=True`` reads the LATEST committed rows (bypassing this request's
+	REPEATABLE-READ snapshot). The initiate path uses it *after*
+	``lock_source_for_initiate`` so the second, just-unblocked caller sees the
+	first caller's freshly-committed transaction and is refused — a plain read
+	would still see the pre-lock snapshot and miss it.
 	"""
 	if not (reference_doctype and reference_name):
 		return None
-	name = frappe.db.get_value(
+	# Fetch name + flow_type in the one (optionally FOR UPDATE) read. Loading the
+	# full doc with a second get_doc would read this request's REPEATABLE-READ
+	# snapshot and miss a row the FOR UPDATE query just saw committed.
+	return frappe.db.get_value(
 		"Pinelabs Transaction",
 		{
 			"reference_doctype": reference_doctype,
 			"reference_name": reference_name,
 			"status": ["in", ACTIVE_STATUSES],
 		},
-		"name",
+		["name", "flow_type"],
 		order_by="creation desc",
+		for_update=for_update,
+		as_dict=True,
 	)
-	return frappe.get_doc("Pinelabs Transaction", name) if name else None
 
 
 # ──────────────────────────────────────────────────────────────────────────
