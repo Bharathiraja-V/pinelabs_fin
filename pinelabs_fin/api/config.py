@@ -26,6 +26,11 @@ def test_plural_connection() -> dict:
 	"""
 	from pinelabs_fin.api.plural_client import get_plural_client
 
+	# This is a Settings-form button and it probes live gateway credentials.
+	# Without a role gate any logged-in user could use it as an oracle to
+	# confirm whether the merchant's Plural credentials are valid.
+	frappe.only_for("System Manager")
+
 	# Force a fresh fetch — a cached token from before the user updated
 	# credentials would mask a misconfig. Token is re-cached on success.
 	frappe.cache().delete_value("pine_plural_access_token")

@@ -70,9 +70,14 @@ class TestTransactionStateMachine(unittest.TestCase):
 class TestPaymentEntryGuards(unittest.TestCase):
 	"""mark_success() respects the 7 PE creation rules from PHASE_1_PLAN §8."""
 
-	@classmethod
-	def setUpClass(cls):
-		cls._invoice = _make_test_invoice()
+	def setUp(self):
+		# A FRESH invoice per test, not a class-level shared one. mark_success
+		# calls frappe.db.commit() (the customer is already charged, so the PE
+		# must be durable), which means tearDown's rollback cannot undo a PE
+		# posted by an earlier test. Sharing one invoice let the alphabetically
+		# earlier test_existing_pe_… fully pay it, so this class's other tests
+		# then hit the zero-outstanding conflict guard and created no PE at all.
+		self._invoice = _make_test_invoice()
 
 	def tearDown(self):
 		frappe.db.rollback()
@@ -1075,12 +1080,25 @@ def _make_test_invoice():
 	settings.flags.ignore_mandatory = True
 
 	# Make sure Sales Invoice is in payable_doctypes.
-	if not any(r.doctype_name == "Sales Invoice" for r in (settings.payable_doctypes or [])):
-		settings.append("payable_doctypes", {
+	row = None
+	for candidate in (settings.payable_doctypes or []):
+		if candidate.doctype_name == "Sales Invoice":
+			row = candidate
+			break
+	if row is None:
+		row = settings.append("payable_doctypes", {
 			"doctype_name": "Sales Invoice",
-			"is_enabled": 1,
 			"amount_field": "outstanding_amount",
 		})
+	# Force the switches on whether the row is new or pre-existing. These are
+	# now enforced server-side, and a site's real row may legitimately have
+	# one of them off — which would fail every payment test for a reason that
+	# has nothing to do with what is under test. amount_field is deliberately
+	# left as configured: the test invoice has no taxes, so total /
+	# grand_total / outstanding_amount all agree.
+	row.is_enabled = 1
+	row.enable_pay_on_machine = 1
+	row.enable_send_payment_link = 1
 	settings.save(ignore_permissions=True)
 
 	invoice = frappe.get_doc({
@@ -1216,3 +1234,254 @@ def _set_settings(**fields):
 	frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
 
 
+class TestSettingsGates(unittest.TestCase):
+	"""The Settings switches must refuse the API, not just hide the button."""
+
+	def setUp(self):
+		self.invoice = _make_test_invoice()
+		_ensure_default_machine()
+
+	def tearDown(self):
+		frappe.db.rollback()
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	def _initiate_terminal(self):
+		from pinelabs_fin.api import terminal
+
+		return terminal.initiate_terminal_payment(
+			reference_doctype="Sales Invoice",
+			reference_name=self.invoice.name,
+			mode_of_payment="PineLabs - Card",
+		)
+
+	def _initiate_plural(self):
+		from pinelabs_fin.api import plural
+
+		return plural.initiate_payment_link(
+			reference_doctype="Sales Invoice",
+			reference_name=self.invoice.name,
+			customer_email="buyer@example.com",
+			customer_mobile="9876543210",
+		)
+
+	# ── master switch ────────────────────────────────────────────────────
+
+	def test_master_switch_off_blocks_terminal(self):
+		_set_settings(enabled=0)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._initiate_terminal()
+		self.assertIn("not enabled", str(ctx.exception))
+
+	def test_master_switch_off_blocks_payment_link(self):
+		"""The regression: 'enabled' gated Terminal via pinelabs_client but was
+		never read by the Plural flow, so a link was still created and sent."""
+		_set_settings(enabled=0, enable_payment_links=1)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._initiate_plural()
+		self.assertIn("not enabled", str(ctx.exception))
+
+	# ── enable_payment_links ─────────────────────────────────────────────
+
+	def test_payment_links_switch_off_blocks_plural(self):
+		_set_settings(enabled=1, enable_payment_links=0)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._initiate_plural()
+		self.assertIn("Payment Links are not enabled", str(ctx.exception))
+
+	def test_payment_links_switch_off_does_not_block_terminal(self):
+		"""It's a Plural-only switch — the terminal flow must be unaffected."""
+		from pinelabs_fin.api import access
+
+		_set_settings(enabled=1, enable_payment_links=0)
+		# Gate only; the full initiate would need a live terminal.
+		access.assert_integration_enabled("Terminal")
+
+	# ── Payable Documents row ────────────────────────────────────────────
+
+	def test_disabled_payable_row_blocks_both_flows(self):
+		_set_settings(enabled=1, enable_payment_links=1)
+		_set_payable_row("Sales Invoice", is_enabled=0)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._initiate_terminal()
+		self.assertIn("disabled for Sales Invoice", str(ctx.exception))
+		with self.assertRaises(frappe.ValidationError):
+			self._initiate_plural()
+
+	def test_per_flow_toggle_pay_on_machine(self):
+		_set_settings(enabled=1, enable_payment_links=1)
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			enable_pay_on_machine=0, enable_send_payment_link=1,
+		)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._initiate_terminal()
+		self.assertIn("Pay on Machine", str(ctx.exception))
+
+	def test_per_flow_toggle_send_payment_link(self):
+		_set_settings(enabled=1, enable_payment_links=1)
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			enable_pay_on_machine=1, enable_send_payment_link=0,
+		)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._initiate_plural()
+		self.assertIn("Send Payment Link", str(ctx.exception))
+
+	def test_no_payable_row_stays_permissive(self):
+		"""Documented contract (transaction.validate_finalization_ready case 3):
+		a doctype with NO row is still allowed — consumer apps rely on it."""
+		from pinelabs_fin.api import access
+
+		_set_settings(enabled=1, enable_payment_links=1)
+		# "ToDo" has no Payable Documents row.
+		access.assert_doctype_payable("ToDo", "Terminal")
+		access.assert_doctype_payable("ToDo", "Plural")
+
+
+class TestAuthorizationGates(unittest.TestCase):
+	"""Whitelisted payment endpoints must check permissions."""
+
+	def setUp(self):
+		self.invoice = _make_test_invoice()
+		_ensure_default_machine()
+		_set_settings(enabled=1, enable_payment_links=1)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.db.rollback()
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	def _make_powerless_user(self):
+		email = "pinelabs_noperm@example.com"
+		if not frappe.db.exists("User", email):
+			user = frappe.get_doc({
+				"doctype": "User",
+				"email": email,
+				"first_name": "NoPerm",
+				"send_welcome_email": 0,
+				"roles": [],
+			})
+			user.insert(ignore_permissions=True)
+		return email
+
+	def test_initiate_terminal_refuses_user_without_write_on_source(self):
+		from pinelabs_fin.api import terminal
+
+		frappe.set_user(self._make_powerless_user())
+		with self.assertRaises(frappe.PermissionError):
+			terminal.initiate_terminal_payment(
+				reference_doctype="Sales Invoice",
+				reference_name=self.invoice.name,
+				mode_of_payment="PineLabs - Card",
+			)
+
+	def test_initiate_payment_link_refuses_user_without_write_on_source(self):
+		from pinelabs_fin.api import plural
+
+		frappe.set_user(self._make_powerless_user())
+		with self.assertRaises(frappe.PermissionError):
+			plural.initiate_payment_link(
+				reference_doctype="Sales Invoice",
+				reference_name=self.invoice.name,
+				customer_email="buyer@example.com",
+				customer_mobile="9876543210",
+			)
+
+	def test_txn_scoped_endpoint_refuses_foreign_user(self):
+		"""IDOR: reading someone else's transaction by guessing its PLT- name."""
+		from pinelabs_fin.api import terminal
+		from pinelabs_fin.api import transaction as txn_service
+
+		txn = txn_service.create_transaction(
+			reference_doctype="Sales Invoice",
+			reference_name=self.invoice.name,
+			flow_type="Terminal",
+			amount=100,
+			payment_method="CARD",
+		)
+		frappe.set_user(self._make_powerless_user())
+		with self.assertRaises(frappe.PermissionError):
+			terminal.check_terminal_status(txn.name)
+
+	def test_administrator_bypasses_the_gate(self):
+		"""The cron reconciler runs as Administrator and must keep working."""
+		from pinelabs_fin.api import access
+
+		frappe.set_user("Administrator")
+		access.assert_can_pay("Sales Invoice", self.invoice.name)
+
+
+class TestConfiguredAmountField(unittest.TestCase):
+	"""The Payable Documents 'Amount Field' must actually drive the charge.
+
+	Settings made it mandatory, but nothing ever read it — both flows
+	hardcoded outstanding_amount / grand_total, so a configured field was
+	silently ignored and the customer was charged the full total.
+	"""
+
+	def tearDown(self):
+		frappe.db.rollback()
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	def test_configured_field_wins_over_grand_total(self):
+		from pinelabs_fin.api.transaction import resolve_payment_amount
+
+		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="custom_part_payment")
+		doc = _StubDoc(
+			doctype="Sales Invoice", docstatus=1,
+			custom_part_payment=250, outstanding_amount=1000, grand_total=1000,
+		)
+		self.assertEqual(resolve_payment_amount(doc), 250.0)
+
+	def test_falls_back_when_configured_field_is_empty(self):
+		from pinelabs_fin.api.transaction import resolve_payment_amount
+
+		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="custom_part_payment")
+		doc = _StubDoc(
+			doctype="Sales Invoice", docstatus=1,
+			custom_part_payment=0, outstanding_amount=600, grand_total=1000,
+		)
+		self.assertEqual(resolve_payment_amount(doc), 600.0)
+
+	def test_settled_invoice_still_refused_even_with_configured_field(self):
+		"""The configured field must not resurrect a fully-paid document."""
+		from pinelabs_fin.api.transaction import resolve_payment_amount
+
+		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="custom_part_payment")
+		doc = _StubDoc(
+			doctype="Sales Invoice", docstatus=1,
+			custom_part_payment=250, outstanding_amount=0, grand_total=1000,
+		)
+		self.assertEqual(resolve_payment_amount(doc), 0.0)
+
+	def test_submitted_outstanding_is_authoritative_without_config(self):
+		from pinelabs_fin.api.transaction import resolve_payment_amount
+
+		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="outstanding_amount")
+		doc = _StubDoc(
+			doctype="Sales Invoice", docstatus=1,
+			outstanding_amount=400, grand_total=1000,
+		)
+		self.assertEqual(resolve_payment_amount(doc), 400.0)
+
+	def test_draft_falls_back_to_rounded_total(self):
+		from pinelabs_fin.api.transaction import resolve_payment_amount
+
+		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="outstanding_amount")
+		doc = _StubDoc(
+			doctype="Sales Invoice", docstatus=0,
+			outstanding_amount=0, rounded_total=990, grand_total=987.65,
+		)
+		self.assertEqual(resolve_payment_amount(doc), 990.0)
+
+	def test_both_flows_share_one_resolver(self):
+		"""plural._amount_for used to be a separate, drifted copy."""
+		from pinelabs_fin.api import plural, terminal
+
+		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="custom_part_payment")
+		doc = _StubDoc(
+			doctype="Sales Invoice", docstatus=1,
+			custom_part_payment=125, outstanding_amount=1000, grand_total=1000,
+		)
+		self.assertEqual(terminal._amount_for(doc), 125.0)
+		self.assertEqual(plural._amount_for(doc), 125.0)

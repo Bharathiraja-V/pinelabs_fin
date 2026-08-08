@@ -934,6 +934,10 @@ def _get_payable_config(reference_doctype):
 		return {
 			"doctype_name": row.doctype_name,
 			"is_enabled": cint(row.is_enabled),
+			# Per-flow toggles. Read by api/access.py so switching one off in
+			# Settings actually refuses the API call, not just hides the button.
+			"enable_pay_on_machine": cint(getattr(row, "enable_pay_on_machine", 1) or 0),
+			"enable_send_payment_link": cint(getattr(row, "enable_send_payment_link", 1) or 0),
 			"show_on_docstatus": row.show_on_docstatus,
 			"amount_field": row.amount_field,
 			"status_field": row.status_field,
@@ -942,6 +946,60 @@ def _get_payable_config(reference_doctype):
 			"finalize_via_payment_entry": cint(getattr(row, "finalize_via_payment_entry", 1) or 0),
 		}
 	return None
+
+
+def resolve_payment_amount(source_doc):
+	"""Return the amount to charge for ``source_doc``, honouring Settings.
+
+	Precedence:
+
+	1. The ``Amount Field`` configured on the doctype's Payable Documents row.
+	   Settings *requires* this field to be filled, but until now nothing ever
+	   read it — both flows hardcoded the fallback chain below, so a site that
+	   configured ``Amount Field = custom_part_payment`` still charged the full
+	   ``grand_total``. That silent override is the bug this fixes.
+	2. ``outstanding_amount`` on a submitted doc — authoritative INCLUDING when
+	   it is 0. Returning 0 makes the caller refuse with "No outstanding
+	   amount"; the document-total fallback must not apply here or an
+	   already-settled invoice would be charged in full a second time.
+	3. ``rounded_total`` / ``grand_total`` / ``amount`` — for drafts (whose
+	   ``outstanding_amount`` is only computed at submit) and for submittable
+	   doctypes that have no ``outstanding_amount`` field at all.
+
+	The settled-document guard applies to the configured field too: a
+	submitted doc whose ``outstanding_amount`` has reached 0 is refused
+	regardless of what the configured field still reads, so honouring the
+	setting can never re-open the double-charge hole. Partial amounts BELOW
+	the outstanding balance are allowed — that is the point of the setting.
+	"""
+	is_settled = _is_settled(source_doc)
+
+	config = _get_payable_config(getattr(source_doc, "doctype", None))
+	amount_field = ((config or {}).get("amount_field") or "").strip()
+	if amount_field:
+		val = getattr(source_doc, amount_field, None)
+		if val is not None and flt(val) > 0:
+			# Never let a configured field resurrect a fully-paid document.
+			return 0.0 if is_settled else flt(val)
+
+	if cint(getattr(source_doc, "docstatus", 0)) == 1:
+		outstanding = getattr(source_doc, "outstanding_amount", None)
+		if outstanding is not None:
+			return flt(outstanding) if flt(outstanding) > 0 else 0.0
+
+	for field in ("rounded_total", "grand_total", "amount"):
+		val = getattr(source_doc, field, None)
+		if val is not None and flt(val) > 0:
+			return flt(val)
+	return 0.0
+
+
+def _is_settled(source_doc):
+	"""True when a submitted doc reports a non-positive outstanding balance."""
+	if cint(getattr(source_doc, "docstatus", 0)) != 1:
+		return False
+	outstanding = getattr(source_doc, "outstanding_amount", None)
+	return outstanding is not None and flt(outstanding) <= 0
 
 
 def _apply_mapped_finalization(transaction, config):

@@ -70,6 +70,7 @@ def initiate_terminal_payment(
 	  untouched
 	- omitted / ``None`` → use the row's setting (current behaviour)
 	"""
+	from pinelabs_fin.api import access
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
 	from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
@@ -77,6 +78,13 @@ def initiate_terminal_payment(
 	)
 
 	source_doc = _load_eligible_source(reference_doctype, reference_name)
+	# Settings switches + per-doctype row + permission, all BEFORE the gateway
+	# is contacted. Previously these were enforced only in the browser, so the
+	# endpoint charged cards for doctypes that were switched off and for users
+	# with no rights to the document.
+	access.assert_initiate_allowed(
+		reference_doctype, reference_name, flow="Terminal", source_doc=source_doc
+	)
 	# Fail fast BEFORE we contact Pine Labs — if finalization won't work for
 	# this doctype, the customer should never be asked to tap their card.
 	txn_service.validate_finalization_ready(reference_doctype)
@@ -267,10 +275,15 @@ def check_terminal_status(transaction_name: str, create_payment_entry: int | Non
 	Pinelabs Transaction so the finalize path uses it. Omit to leave the
 	stored value (or the Payable Documents config) untouched.
 	"""
+	from pinelabs_fin.api import access
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
 
 	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	# Whoever may take the payment may watch it. Without this, any logged-in
+	# user could read another user's payment records by guessing a PLT- name.
+	# The cron reconciler reaches this as Administrator and bypasses the check.
+	access.assert_txn_access(txn)
 	# Late override — caller can flip the create-PE decision before the
 	# poll triggers mark_success. Stored on the row so the cron/webhook
 	# paths also honor the latest value.
@@ -402,6 +415,7 @@ def retry_failed_terminal_payment(transaction_name: str) -> dict:
 
 	Returns the same 5-key envelope as initiate_terminal_payment.
 	"""
+	from pinelabs_fin.api import access
 	from pinelabs_fin.api.transaction import PINELABS_METHOD_TO_MODE
 
 	if not frappe.db.exists("Pinelabs Transaction", transaction_name):
@@ -409,6 +423,9 @@ def retry_failed_terminal_payment(transaction_name: str) -> dict:
 			_("Pinelabs Transaction {0} does not exist.").format(transaction_name),
 		)
 	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	# Retry starts a REAL new charge, so gate it here as well as inside
+	# initiate_terminal_payment — this refuses before we read the source doc.
+	access.assert_txn_access(txn)
 	if txn.flow_type != "Terminal":
 		frappe.throw(
 			_("Transaction {0} is not a Terminal transaction.").format(transaction_name),
@@ -434,10 +451,13 @@ def retry_failed_terminal_payment(transaction_name: str) -> dict:
 @frappe.whitelist()
 def cancel_terminal_payment(transaction_name: str, reason: str | None = None) -> dict:
 	"""User-driven cancel of an in-flight terminal transaction."""
+	from pinelabs_fin.api import access
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
 
 	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	# Cancelling is destructive to a live payment — same bar as taking it.
+	access.assert_txn_access(txn)
 	if txn.flow_type != "Terminal":
 		frappe.throw(_("Transaction {0} is not a Terminal transaction.").format(transaction_name))
 	if txn.status in ("SUCCESS", "FAILED", "CANCELLED"):
@@ -683,19 +703,16 @@ def _load_eligible_source(reference_doctype, reference_name):
 
 
 def _amount_for(source_doc):
-	# Submitted docs with a real outstanding balance: that's authoritative.
-	# Drafts have outstanding_amount=0 (computed at submit), so for them we
-	# fall back to rounded_total / grand_total / amount so the customer is
-	# charged the correct figure even before the doc is submitted.
-	if cint(getattr(source_doc, "docstatus", 0)) == 1:
-		outstanding = getattr(source_doc, "outstanding_amount", None)
-		if outstanding is not None and flt(outstanding) > 0:
-			return flt(outstanding)
-	for field in ("rounded_total", "grand_total", "amount"):
-		val = getattr(source_doc, field, None)
-		if val is not None and flt(val) > 0:
-			return flt(val)
-	return 0.0
+	"""Thin alias — the resolution rules live in one place for both flows.
+
+	See ``transaction.resolve_payment_amount``: it honours the Payable
+	Documents ``Amount Field`` (which used to be silently ignored) and keeps
+	the settled-document guard that stops a fully-paid invoice being charged
+	again.
+	"""
+	from pinelabs_fin.api import transaction as txn_service
+
+	return txn_service.resolve_payment_amount(source_doc)
 
 
 def _load_pinelabs_mode(mode_of_payment, expected_flows):

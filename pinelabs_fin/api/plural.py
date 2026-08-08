@@ -61,6 +61,7 @@ def initiate_payment_link(
 	Returns:
 	  {success, transaction_name, payment_link_url, payment_link_id, message}
 	"""
+	from pinelabs_fin.api import access
 	from pinelabs_fin.api import transaction as txn_service
 
 	print(f"[PineLabs PayByLink] Initiate: reference_doctype={reference_doctype} reference_name={reference_name} flow={flow} expiry_minutes={expiry_minutes}")
@@ -70,6 +71,13 @@ def initiate_payment_link(
 		frappe.throw(_("Unknown flow: {0}").format(flow))
 
 	source_doc = _load_eligible_source(reference_doctype, reference_name)
+	# Settings switches + per-doctype row + permission, all BEFORE Plural is
+	# contacted. Neither the master 'Enabled' switch nor 'Enable Payment Links'
+	# reached this endpoint before — they only hid the button — so a link could
+	# be created and SMS'd to a customer with the integration switched off.
+	access.assert_initiate_allowed(
+		reference_doctype, reference_name, flow="Plural", source_doc=source_doc
+	)
 	# Fail fast BEFORE we ask Plural to deliver a link — if finalization
 	# won't work for this doctype, the customer should never see the link.
 	txn_service.validate_finalization_ready(reference_doctype)
@@ -147,10 +155,14 @@ def initiate_payment_link(
 @frappe.whitelist()
 def refresh_payment_link_status(transaction_name: str) -> dict:
 	"""Manual status refresh for admin troubleshooting (webhooks are primary)."""
+	from pinelabs_fin.api import access
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.plural_client import get_plural_client
 
 	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	# Same bar as taking the payment. The cron reconciler runs as
+	# Administrator and bypasses this the way it bypasses every Frappe check.
+	access.assert_txn_access(txn)
 	if txn.flow_type != "Plural":
 		frappe.throw(_("Transaction {0} is not a Plural transaction.").format(transaction_name))
 	if txn.status in ("SUCCESS", "FAILED", "CANCELLED"):
@@ -434,11 +446,16 @@ def _load_eligible_source(reference_doctype, reference_name):
 
 
 def _amount_for(source_doc):
-	for field in ("outstanding_amount", "grand_total", "amount"):
-		val = getattr(source_doc, field, None)
-		if val is not None:
-			return flt(val)
-	return 0.0
+	"""Thin alias — shared with the Terminal flow so the two can't drift.
+
+	See ``transaction.resolve_payment_amount``. Besides honouring the Payable
+	Documents ``Amount Field`` (previously ignored), this also picks up the
+	``rounded_total`` fallback that the Terminal flow already had and this one
+	was missing.
+	"""
+	from pinelabs_fin.api import transaction as txn_service
+
+	return txn_service.resolve_payment_amount(source_doc)
 
 
 def _settings_default_expiry():
