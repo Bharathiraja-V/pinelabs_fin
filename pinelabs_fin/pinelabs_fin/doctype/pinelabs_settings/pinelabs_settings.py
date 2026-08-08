@@ -133,8 +133,10 @@ class PinelabsSettings(Document):
 				return
 
 	def _validate_payable_doctypes(self):
-		"""Require amount_field, no duplicates, and mapped-status fields when
-		Create Payment Entry is unchecked.
+		"""Require amount_field and no duplicate rows.
+
+		Unchecking Create Payment Entry needs no extra configuration — it
+		simply means "record the payment, post nothing to the ledger".
 		"""
 		seen = set()
 		for row in (self.payable_doctypes or []):
@@ -147,15 +149,14 @@ class PinelabsSettings(Document):
 			if not (row.amount_field or "").strip():
 				frappe.throw(_("Payable Doctype {0} requires an Amount Field.").format(doctype))
 
-			# When PE creation is off, mapped-field updates must be configured.
-			if not cint(getattr(row, "finalize_via_payment_entry", 1)):
-				if not (row.status_field or "").strip() or not (row.paid_status_value or "").strip():
-					frappe.throw(
-						_("Payable Doctype {0}: with Create Payment Entry unchecked, both Status Field and Paid Status Value are required.").format(doctype)
-					)
-
-			self._validate_contact_mapping(row, doctype, "mobile", _("Mobile"))
-			self._validate_contact_mapping(row, doctype, "email", _("Email"))
+			# The Customer Contact Field Mapping is Pay-by-Link only (it tells
+			# Plural where to read the mobile / email the hosted link is sent
+			# to). Its fields are hidden in the grid when Enable Payment Links
+			# is off, so validating them there would throw about fields the
+			# user cannot see or fix.
+			if cint(self.enable_payment_links):
+				self._validate_contact_mapping(row, doctype, "mobile", _("Mobile"))
+				self._validate_contact_mapping(row, doctype, "email", _("Email"))
 
 	def _validate_contact_mapping(self, row, doctype, field_type, label):
 		"""For each contact-field mapping that's been opted into, require its

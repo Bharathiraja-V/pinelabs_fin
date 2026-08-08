@@ -1186,6 +1186,7 @@ def _ensure_routing_machines():
 		settings.flags.ignore_mandatory = True
 		settings.save(ignore_permissions=True)
 
+
 # ──────────────────────────────────────────────────────────────────────────
 # Settings gates + authorization (api/access.py)
 #
@@ -1485,3 +1486,126 @@ class TestConfiguredAmountField(unittest.TestCase):
 		)
 		self.assertEqual(terminal._amount_for(doc), 125.0)
 		self.assertEqual(plural._amount_for(doc), 125.0)
+
+
+class TestTransactionReferenceField(unittest.TestCase):
+	"""The Payable Documents 'Transaction Reference Field' must be written on
+	EVERY finalization path.
+
+	It used to be written only inside the (now removed) status-mapping path,
+	so with 'Create Payment Entry' ticked — the common case — a configured
+	reference field was silently never filled.
+	"""
+
+	# A real, writable field on Sales Invoice that isn't used by these tests.
+	REF_FIELD = "remarks"
+
+	def setUp(self):
+		self.invoice = _make_test_invoice()
+		_ensure_default_machine()
+		_set_settings(enabled=1, enable_payment_links=1)
+
+	def tearDown(self):
+		frappe.db.rollback()
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	def _make_pending_txn(self, create_payment_entry=None):
+		from pinelabs_fin.api import transaction as txn_service
+
+		txn = txn_service.create_transaction(
+			reference_doctype="Sales Invoice",
+			reference_name=self.invoice.name,
+			flow_type="Terminal",
+			amount=100,
+			payment_method="CARD",
+			create_payment_entry=create_payment_entry,
+		)
+		return txn_service.mark_pending(txn, order_id="ORD-REF-TEST")
+
+	def _ref_value(self):
+		return frappe.db.get_value("Sales Invoice", self.invoice.name, self.REF_FIELD)
+
+	def test_reference_written_on_payment_entry_path(self):
+		"""The regression: PE ticked used to skip the reference write entirely."""
+		from pinelabs_fin.api import transaction as txn_service
+
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			finalize_via_payment_entry=1,
+			link_payment_entry_field=self.REF_FIELD,
+		)
+		txn = self._make_pending_txn()
+		txn = txn_service.mark_success(txn, payment_id="PAY-REF-PE", payment_method="CARD")
+
+		self.assertEqual(txn.status, "SUCCESS")
+		self.assertTrue(txn.payment_entry, "a Payment Entry should have been created")
+		self.assertEqual(self._ref_value(), txn.name)
+
+	def test_reference_written_on_no_payment_entry_path(self):
+		from pinelabs_fin.api import transaction as txn_service
+
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			finalize_via_payment_entry=1,
+			link_payment_entry_field=self.REF_FIELD,
+		)
+		# Per-call override wins over the row's setting.
+		txn = self._make_pending_txn(create_payment_entry=0)
+		txn = txn_service.mark_success(txn, payment_id="PAY-REF-NOPE", payment_method="CARD")
+
+		self.assertEqual(txn.status, "SUCCESS")
+		self.assertFalse(txn.payment_entry, "no Payment Entry should have been created")
+		self.assertEqual(self._ref_value(), txn.name)
+
+	def test_no_reference_field_configured_is_a_no_op(self):
+		from pinelabs_fin.api import transaction as txn_service
+
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			finalize_via_payment_entry=1,
+			link_payment_entry_field=None,
+		)
+		before = self._ref_value()
+		txn = self._make_pending_txn()
+		txn = txn_service.mark_success(txn, payment_id="PAY-REF-NONE", payment_method="CARD")
+
+		self.assertEqual(txn.status, "SUCCESS")
+		self.assertEqual(self._ref_value(), before)
+
+	def test_bad_field_name_does_not_break_success(self):
+		"""The customer has already been charged — a typo in config must not
+		roll back the SUCCESS or the Payment Entry."""
+		from pinelabs_fin.api import transaction as txn_service
+
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			finalize_via_payment_entry=1,
+			link_payment_entry_field="no_such_field_xyz",
+		)
+		txn = self._make_pending_txn()
+		txn = txn_service.mark_success(txn, payment_id="PAY-REF-BAD", payment_method="CARD")
+
+		self.assertEqual(txn.status, "SUCCESS")
+		self.assertTrue(txn.payment_entry)
+
+	def test_mapped_finalization_is_gone(self):
+		"""The status-mapping path and its config keys no longer exist."""
+		from pinelabs_fin.api import transaction as txn_service
+
+		self.assertFalse(hasattr(txn_service, "_apply_mapped_finalization"))
+		config = txn_service._get_payable_config("Sales Invoice")
+		self.assertNotIn("status_field", config)
+		self.assertNotIn("paid_status_value", config)
+		self.assertIn("link_payment_entry_field", config)
+
+	def test_unticking_create_pe_needs_no_extra_config(self):
+		"""Settings used to refuse to save unless status_field + paid_status_value
+		were filled whenever Create Payment Entry was unticked."""
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			finalize_via_payment_entry=0,
+			link_payment_entry_field=None,
+		)
+		settings = frappe.get_single("Pinelabs Settings")
+		row = next(r for r in settings.payable_doctypes if r.doctype_name == "Sales Invoice")
+		self.assertEqual(cint(row.finalize_via_payment_entry), 0)

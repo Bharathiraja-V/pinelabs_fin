@@ -55,8 +55,8 @@ def initiate_payment_link(
 	``create_payment_entry`` (optional, ``0`` / ``1``): per-call override of
 	the Payable Documents row's Create Payment Entry setting. ``1`` forces
 	PE creation on success (and runs the account-mapping pre-flight now);
-	``0`` skips PE creation entirely (mapped finalization is used if
-	configured). Omit to use the configured default.
+	``0`` skips PE creation entirely (the payment is still recorded on the
+	Pinelabs Transaction). Omit to use the configured default.
 
 	Returns:
 	  {success, transaction_name, payment_link_url, payment_link_id, message}

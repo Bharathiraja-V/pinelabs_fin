@@ -65,9 +65,8 @@ def initiate_terminal_payment(
 
 	- ``1`` → always create a PE on success (and run the account-mapping
 	  pre-flight now)
-	- ``0`` → never create a PE; fall back to mapped finalization if the
-	  Payable Documents row configures it, otherwise leave the source doc
-	  untouched
+	- ``0`` → never create a PE; the payment is still recorded on the
+	  Pinelabs Transaction and the source doc is left untouched
 	- omitted / ``None`` → use the row's setting (current behaviour)
 	"""
 	from pinelabs_fin.api import access

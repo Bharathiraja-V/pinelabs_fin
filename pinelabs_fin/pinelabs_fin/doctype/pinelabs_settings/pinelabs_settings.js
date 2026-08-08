@@ -119,7 +119,6 @@ const EMAIL_DEPENDENTS = [
 // fieldnames, so a switch invalidates them.
 const SOURCE_FIELD_DEPENDENTS = [
 	"amount_field",
-	"status_field",
 	"link_payment_entry_field",
 ];
 
@@ -187,7 +186,6 @@ function populate_source_options(frm, cdn, doctype) {
 			const data = r.message || {};
 			// Existing-section fields driven from the source doctype.
 			set_row_options(frm, cdn, "amount_field", data.amount_fields);
-			set_row_options(frm, cdn, "status_field", data.status_fields);
 			set_row_options(frm, cdn, "link_payment_entry_field", data.reference_fields);
 			// Customer Contact section.
 			set_row_options(frm, cdn, "mobile_link_field", data.link_fields);

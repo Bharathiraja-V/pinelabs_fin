@@ -17,8 +17,7 @@ The easiest way to use Pine Labs is to configure it for an existing DocType. Thi
     *   `1`: Show on Submitted documents.
     *   `0,1`: Show on both.
 5.  **Amount Field**: Select the field that contains the amount (e.g., `outstanding_amount`).
-6.  **Status Field**: Select the field that tracks payment status (e.g., `status`).
-7.  **Paid Status Value**: Enter the value that should be set when payment succeeds (e.g., `Paid`).
+6.  **Transaction Reference Field** (optional): Select a field that should receive the Pinelabs Transaction id (`PLT-…`) when payment succeeds.
 8.  **Create Payment Entry**: Check this if you want the system to automatically create a standard ERPNext Payment Entry.
 
 ---

@@ -218,12 +218,12 @@ pinelabs_fin.api.terminal.check_terminal_status(
 
 ### `create_payment_entry`
 
-A per-call override of the Payable Documents row's `Create Payment Entry` setting. Useful when calling the APIs from your own custom button on a doctype that doesn't have a Payable Documents row (or has one configured for mapped-field finalization).
+A per-call override of the Payable Documents row's `Create Payment Entry` setting. Useful when calling the APIs from your own custom button on a doctype that doesn't have a Payable Documents row (or has one with `Create Payment Entry` unticked).
 
 | Value | Effect |
 |---|---|
 | `1` | Force PE creation on success. Runs the account-mapping + customer-resolution pre-flight before contacting Pine Labs |
-| `0` | Skip PE creation. Falls back to mapped-field finalization if configured, otherwise leaves the source doc untouched |
+| `0` | Skip PE creation. The payment is still recorded on the Pinelabs Transaction; the source doc is left untouched |
 | omitted / `None` | Use the Payable Documents row's setting (or "no PE" if the source doctype isn't PE-native and has no row) |
 
 For a custom doctype with `create_payment_entry=1`, the app builds the PE manually since ERPNext's `get_payment_entry` helper only supports Sales Invoice / POS Invoice / Payment Request. The source doctype should expose a `customer` Link field (or fall back to ERPNext's Default Customer in Global Defaults) so `party_type = Customer` can be set on the PE.
@@ -258,7 +258,7 @@ frappe.pinelabs.start_payment_link(
 
 - **Refunds** are not initiated by the app — use Pine Labs' own refund flow, then reflect the change in ERPNext manually.
 - **Currency** — only INR (Plural's API does not accept other currencies in this release).
-- **Automatic Payment Entry** — works natively for Sales Invoice, POS Invoice and Payment Request. Custom doctypes can also create PEs by passing `create_payment_entry=1` to the API (and exposing a `customer` Link field or using ERPNext's Default Customer). Otherwise the app uses the mapped-status-field path or the permissive "no PE" path.
+- **Automatic Payment Entry** — works natively for Sales Invoice, POS Invoice and Payment Request. Custom doctypes can also create PEs by passing `create_payment_entry=1` to the API (and exposing a `customer` Link field or using ERPNext's Default Customer). Otherwise the app records the payment on the Pinelabs Transaction without posting a Payment Entry.
 - **Renaming the canonical Modes of Payment** (`PineLabs - Card` / `PineLabs - UPI` / `PineLabs - Payment Link`) breaks the integration silently — Pine Labs modes are identified by name, not by custom fields.
 
 ---
