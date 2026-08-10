@@ -1116,6 +1116,7 @@ def _make_test_invoice():
 
 def _ensure_default_machine():
 	settings = frappe.get_single("Pinelabs Settings")
+	dirty = False
 	if not settings.machines:
 		settings.append("machines", {
 			"machine_name": "Test Machine",
@@ -1126,8 +1127,27 @@ def _ensure_default_machine():
 			"enabled": 1,
 			"is_default": 1,
 		})
+		dirty = True
+	# The integration master switch and an ACTIVE API endpoint are both
+	# required before PineLabsClient will build. A site that has been used
+	# by hand already has them, which is why this fixture got away without
+	# them for a long time — on a fresh site (a new bench, or CI) every
+	# terminal test failed with "No active API endpoint configured".
+	if not cint(settings.enabled):
+		settings.enabled = 1
+		dirty = True
+	if not any(cint(e.is_active) for e in (settings.api_endpoints or [])):
+		settings.append("api_endpoints", {
+			"endpoints_name": "Test Endpoint",
+			"base_api_url": "https://www.plutuscloudserviceuat.in:8201",
+			"is_active": 1,
+			"verify_ssl": 0,
+		})
+		dirty = True
+	if dirty:
 		settings.flags.ignore_mandatory = True
 		settings.save(ignore_permissions=True)
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
 	_ensure_pinelabs_mop_accounts()
 
 
