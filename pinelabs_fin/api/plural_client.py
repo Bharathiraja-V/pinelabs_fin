@@ -28,6 +28,8 @@ import frappe
 import requests
 from frappe import _
 
+from pinelabs_fin.api.redact import redact
+
 # Canonical Plural API hosts. Single source of truth — also referenced by
 # pinelabs_settings.PinelabsSettings._resolve_plural_base_url to surface the
 # auto-resolved URL on the Settings form.
@@ -73,8 +75,8 @@ class PluralClient:
 		req_dump = (
 			f"[PineLabs PayByLink] Link Request:\n"
 			f"  POST {url}\n"
-			f"  Headers: {json.dumps(headers, indent=2)}\n"
-			f"  Body: {json.dumps(payload, indent=2)}"
+			f"  Headers: {json.dumps(redact(headers), indent=2)}\n"
+			f"  Body: {json.dumps(redact(payload), indent=2)}"
 		)
 		print(req_dump)
 		frappe.logger("pinelabs_paybylink", file_count=5).info(req_dump)
@@ -95,7 +97,7 @@ class PluralClient:
 		resp_dump = (
 			f"[PineLabs PayByLink] Link Response:\n"
 			f"  Status: {response.status_code}\n"
-			f"  Body: {json.dumps(data, indent=2, default=str)}"
+			f"  Body: {json.dumps(redact(data), indent=2, default=str)}"
 		)
 		print(resp_dump)
 		frappe.logger("pinelabs_paybylink", file_count=5).info(resp_dump)
@@ -148,7 +150,7 @@ class PluralClient:
 		resp_dump = (
 			f"[PineLabs PayByLink] Status Response:\n"
 			f"  Status: {response.status_code}\n"
-			f"  Body: {json.dumps(data, indent=2, default=str)}"
+			f"  Body: {json.dumps(redact(data), indent=2, default=str)}"
 		)
 		print(resp_dump)
 		frappe.logger("pinelabs_paybylink", file_count=5).info(resp_dump)
@@ -239,7 +241,7 @@ class PluralClient:
 		req_dump = (
 			f"[PineLabs PayByLink] Token Request:\n"
 			f"  POST {url}\n"
-			f"  Body: {json.dumps(payload, indent=2)}"
+			f"  Body: {json.dumps(redact(payload), indent=2)}"
 		)
 		print(req_dump)
 		frappe.logger("pinelabs_paybylink", file_count=5).info(req_dump)
@@ -254,7 +256,7 @@ class PluralClient:
 		resp_dump = (
 			f"[PineLabs PayByLink] Token Response:\n"
 			f"  Status: {response.status_code}\n"
-			f"  Body: {json.dumps(data, indent=2, default=str)}"
+			f"  Body: {json.dumps(redact(data), indent=2, default=str)}"
 		)
 		print(resp_dump)
 		frappe.logger("pinelabs_paybylink", file_count=5).info(resp_dump)

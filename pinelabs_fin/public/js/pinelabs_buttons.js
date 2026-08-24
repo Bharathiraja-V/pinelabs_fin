@@ -281,6 +281,12 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 			],
 			primary_action_label: __("Start Payment"),
 			primary_action(values) {
+				// Guard against a rapid double-click firing two payments before
+				// the dialog finishes hiding (belt-and-braces on top of the
+				// server-side source-doc lock).
+				if (dialog.__pinelabs_submitting) return;
+				dialog.__pinelabs_submitting = true;
+				dialog.disable_primary_action();
 				dialog.hide();
 				start_terminal_payment(frm, values.mode_of_payment);
 			},
@@ -512,6 +518,10 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 		// API-caller page sees the FINAL outcome, not the intermediate
 		// failure.
 		function retry_payment() {
+			// Re-entrancy guard: a double-click on Retry must not fire two
+			// initiate calls (each would start a fresh terminal payment).
+			if (retry_payment.__inflight) return;
+			retry_payment.__inflight = true;
 			modal.hide();
 			frappe.call({
 				method: "pinelabs_fin.api.terminal.retry_failed_terminal_payment",

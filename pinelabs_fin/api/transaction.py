@@ -79,9 +79,11 @@ def validate_finalization_ready(reference_doctype):
 	Three valid configurations:
 	1. reference_doctype is one of PE_NATIVE_DOCTYPES → ERPNext's
 	   ``get_payment_entry`` will build the PE on success. No setup needed.
-	2. A Payable Documents row exists with finalize_via_payment_entry = 0
-	   AND status_field AND paid_status_value populated → mark_success will
-	   write to the configured field on the source doc.
+	2. A Payable Documents row exists with finalize_via_payment_entry = 0 →
+	   the payment is recorded on the Pinelabs Transaction but no Payment
+	   Entry is posted and the source doc is left untouched (apart from the
+	   optional Transaction Reference Field — see
+	   ``_write_transaction_reference``).
 	3. No Payable Documents row at all → permissive: the payment will
 	   proceed and the Pinelabs Transaction will record SUCCESS, but the
 	   source doc is **not** auto-updated. The caller (custom button,
@@ -89,10 +91,10 @@ def validate_finalization_ready(reference_doctype):
 	   ``pinelabs_txn_update`` realtime event or polling the Pinelabs
 	   Transaction status if they want the source doc to reflect payment.
 
-	The only case that still throws is (4) — a misconfigured Payable
-	Documents row (finalize_via_pe = 1 on a non-PE-native doctype, or
-	missing required mapping fields). That's an admin-side error worth
-	surfacing loudly before the customer is asked to pay.
+	The only case that still throws is (4) — a non-PE-native doctype whose
+	Payable Documents row has 'Create Payment Entry' ticked. ERPNext's
+	builder can't handle it, so finalization would fail *after* the customer
+	paid. That's an admin-side error worth surfacing loudly beforehand.
 	"""
 	if reference_doctype in PE_NATIVE_DOCTYPES:
 		return
@@ -105,14 +107,7 @@ def validate_finalization_ready(reference_doctype):
 
 	if cint(config.get("finalize_via_payment_entry", 1)):
 		frappe.throw(
-			_("Cannot accept Pine Labs payments on {0}: it is not Sales Invoice / POS Invoice / Payment Request, but its Payable Documents row has 'Create Payment Entry' ticked. ERPNext's Payment Entry builder does not support {0}, so finalization would fail after the customer paid. Fix: open the row in Pinelabs Settings → Payable Documents, untick 'Create Payment Entry', and set 'Status Field' + 'Paid Status Value'; or delete the row entirely to use the permissive path (Pinelabs Transaction records the payment; source doc is left untouched).").format(reference_doctype),
-		)
-
-	status_field = (config.get("status_field") or "").strip()
-	paid_value = (config.get("paid_status_value") or "").strip()
-	if not (status_field and paid_value):
-		frappe.throw(
-			_("Cannot accept Pine Labs payments on {0}: its Payable Documents row has 'Create Payment Entry' unticked but is missing 'Status Field' or 'Paid Status Value'. Fill both, or delete the row to use the permissive path.").format(reference_doctype),
+			_("Cannot accept Pine Labs payments on {0}: it is not Sales Invoice / POS Invoice / Payment Request, but its Payable Documents row has 'Create Payment Entry' ticked. ERPNext's Payment Entry builder does not support {0}, so finalization would fail after the customer paid. Fix, pick one: (a) open the row in Pinelabs Settings → Payable Documents and untick 'Create Payment Entry' — the payment is still recorded, no Payment Entry is posted; (b) delete the row entirely to use the permissive path; or (c) call the API with create_payment_entry=1, which builds a standalone Payment Entry for this doctype (it needs a Customer and a Company to resolve).").format(reference_doctype),
 		)
 
 
@@ -141,8 +136,8 @@ def create_transaction(
 	``create_payment_entry`` is the API caller's optional per-transaction
 	override. ``1`` / ``True`` / ``"Yes"`` → finalize will always create a PE;
 	``0`` / ``False`` / ``"No"`` → finalize will always skip PE creation
-	(falls back to mapped finalization if configured). ``None`` → use the
-	Payable Documents row's setting.
+	(the payment is recorded, but nothing is posted to the ledger). ``None``
+	→ use the Payable Documents row's setting.
 	"""
 	if flow_type not in VALID_FLOW_TYPES:
 		frappe.throw(
@@ -173,25 +168,50 @@ def create_transaction(
 	return doc
 
 
-def get_active_for_doc(reference_doctype, reference_name):
+def lock_source_for_initiate(reference_doctype, reference_name):
+	"""Row-lock the source document so concurrent initiate calls serialize.
+
+	``get_active_for_doc`` + ``create_transaction`` is a check-then-act with no
+	lock: two requests can both see "no active transaction" and both create one,
+	producing two charges for the same doc. Taking ``SELECT … FOR UPDATE`` on the
+	source doc row here (before the active-transaction check) forces the second
+	caller to block until the first commits; it then sees the first's active
+	transaction and is refused. Same ``for_update`` mechanism as
+	``_lock_and_reload``. No-op when the reference is incomplete.
+	"""
+	if reference_doctype and reference_name:
+		frappe.db.get_value(reference_doctype, reference_name, "name", for_update=True)
+
+
+def get_active_for_doc(reference_doctype, reference_name, for_update=False):
 	"""Return the open (INITIATED/PENDING) transaction for a source doc, or None.
 
 	Used by the JS button-handlers to detect "already in flight" before
 	starting a new attempt — prevents duplicate spends from rapid clicks.
+
+	``for_update=True`` reads the LATEST committed rows (bypassing this request's
+	REPEATABLE-READ snapshot). The initiate path uses it *after*
+	``lock_source_for_initiate`` so the second, just-unblocked caller sees the
+	first caller's freshly-committed transaction and is refused — a plain read
+	would still see the pre-lock snapshot and miss it.
 	"""
 	if not (reference_doctype and reference_name):
 		return None
-	name = frappe.db.get_value(
+	# Fetch name + flow_type in the one (optionally FOR UPDATE) read. Loading the
+	# full doc with a second get_doc would read this request's REPEATABLE-READ
+	# snapshot and miss a row the FOR UPDATE query just saw committed.
+	return frappe.db.get_value(
 		"Pinelabs Transaction",
 		{
 			"reference_doctype": reference_doctype,
 			"reference_name": reference_name,
 			"status": ["in", ACTIVE_STATUSES],
 		},
-		"name",
+		["name", "flow_type"],
 		order_by="creation desc",
+		for_update=for_update,
+		as_dict=True,
 	)
-	return frappe.get_doc("Pinelabs Transaction", name) if name else None
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -270,6 +290,13 @@ def mark_success(transaction, *, payment_id, payment_method=None, response_paylo
 	try:
 		pe_name = _create_payment_entry_idempotent(transaction)
 		transaction.payment_entry = pe_name
+		# Optional write-back onto the source doc, independent of whether a
+		# Payment Entry was posted. Single call site so every finalization
+		# path (PE-native, custom-doctype PE, and no-PE) behaves the same —
+		# previously this only happened on the now-removed status-mapping
+		# path, so a configured reference field was never filled when a
+		# Payment Entry was created.
+		_write_transaction_reference(transaction)
 		transaction.status = "SUCCESS"
 		transaction.flags.pinelabs_internal_transition = True
 		transaction.save(ignore_permissions=True)
@@ -473,7 +500,7 @@ def will_create_payment_entry(reference_doctype, override=None):
 	1. The reference_doctype isn't PE-native AND has no Payable Documents
 	   row (permissive — custom-button flow, source doc is not auto-finalized).
 	2. The Payable Documents row has ``finalize_via_payment_entry = 0``
-	   (mapped-field finalization writes a status field instead).
+	   (the payment is recorded; no Payment Entry is posted).
 	3. (Implicitly) misconfigured rows — ``validate_finalization_ready``
 	   throws on those before we ever get here.
 
@@ -487,7 +514,7 @@ def will_create_payment_entry(reference_doctype, override=None):
 
 	config = _get_payable_config(reference_doctype)
 	if config and not cint(config.get("finalize_via_payment_entry", 1)):
-		return False  # mapped-field finalization
+		return False  # row says: record the payment, post no Payment Entry
 	if reference_doctype in PE_NATIVE_DOCTYPES:
 		return True
 	if not config:
@@ -508,7 +535,7 @@ def assert_mode_has_account_mapped(mode_of_payment, company, *, reference_doctyp
 	can't finalize.
 
 	The check is skipped when the configured finalization path will NOT
-	create a Payment Entry (mapped-field finalization, or the permissive
+	create a Payment Entry (Create Payment Entry unticked, or the permissive
 	custom-button path on a non-PE-native doctype). In those cases the
 	Mode of Payment is informational only — no account is posted to.
 
@@ -587,7 +614,7 @@ def assert_mode_has_account_mapped(mode_of_payment, company, *, reference_doctyp
 
 def _create_payment_entry_idempotent(transaction):
 	"""Finalize the transaction. Returns the PE name when one is created, or
-	None when the configured doctype uses mapped-field finalization instead.
+	None when the configured doctype is set to post no Payment Entry.
 
 	Idempotent against:
 	- A pre-existing PE with the same reference_no (Plan §8 rule 2).
@@ -597,7 +624,7 @@ def _create_payment_entry_idempotent(transaction):
 	if transaction.payment_entry:
 		return transaction.payment_entry
 
-	# Per-doctype config decides PE vs mapped-field finalization — unless the
+	# Per-doctype config decides whether a PE is posted — unless the
 	# Pinelabs Transaction has an explicit override stored from initiate time
 	# (set by the API caller passing create_payment_entry=0/1).
 	config = _get_payable_config(transaction.reference_doctype)
@@ -610,11 +637,10 @@ def _create_payment_entry_idempotent(transaction):
 		finalize_via_pe = cint((config or {}).get("finalize_via_payment_entry", 1))
 
 	if not finalize_via_pe:
-		# Either Payable Documents config or the API caller said "no PE".
-		# Fall back to mapped finalization if it's configured; otherwise
-		# leave the source doc untouched.
-		if config:
-			_apply_mapped_finalization(transaction, config)
+		# Either the Payable Documents row or the API caller said "no PE".
+		# The payment is still recorded on the Pinelabs Transaction; the
+		# source doc is left untouched apart from the optional reference
+		# field, which mark_success writes for every path.
 		return None
 
 	# Rule 2: PE with same reference_no exists → reuse it.
@@ -909,60 +935,118 @@ def _get_payable_config(reference_doctype):
 		return {
 			"doctype_name": row.doctype_name,
 			"is_enabled": cint(row.is_enabled),
+			# Per-flow toggles. Read by api/access.py so switching one off in
+			# Settings actually refuses the API call, not just hides the button.
+			"enable_pay_on_machine": cint(getattr(row, "enable_pay_on_machine", 1) or 0),
+			"enable_send_payment_link": cint(getattr(row, "enable_send_payment_link", 1) or 0),
 			"show_on_docstatus": row.show_on_docstatus,
 			"amount_field": row.amount_field,
-			"status_field": row.status_field,
-			"paid_status_value": row.paid_status_value,
 			"link_payment_entry_field": row.link_payment_entry_field,
 			"finalize_via_payment_entry": cint(getattr(row, "finalize_via_payment_entry", 1) or 0),
 		}
 	return None
 
 
-def _apply_mapped_finalization(transaction, config):
-	"""Update the source document's status field instead of creating a PE.
+def resolve_payment_amount(source_doc):
+	"""Return the amount to charge for ``source_doc``, honouring Settings.
 
-	- Set status_field = paid_status_value
-	- If link_payment_entry_field is set, write the Pinelabs Transaction name there
-	- If paid_status_value is "Submitted" and the doctype is submittable + draft,
-	  also submit the document.
+	Precedence:
+
+	1. The ``Amount Field`` configured on the doctype's Payable Documents row.
+	   Settings *requires* this field to be filled, but until now nothing ever
+	   read it — both flows hardcoded the fallback chain below, so a site that
+	   configured ``Amount Field = custom_part_payment`` still charged the full
+	   ``grand_total``. That silent override is the bug this fixes.
+	2. ``outstanding_amount`` on a submitted doc — authoritative INCLUDING when
+	   it is 0. Returning 0 makes the caller refuse with "No outstanding
+	   amount"; the document-total fallback must not apply here or an
+	   already-settled invoice would be charged in full a second time.
+	3. ``rounded_total`` / ``grand_total`` / ``amount`` — for drafts (whose
+	   ``outstanding_amount`` is only computed at submit) and for submittable
+	   doctypes that have no ``outstanding_amount`` field at all.
+
+	The settled-document guard applies to the configured field too: a
+	submitted doc whose ``outstanding_amount`` has reached 0 is refused
+	regardless of what the configured field still reads, so honouring the
+	setting can never re-open the double-charge hole. Partial amounts BELOW
+	the outstanding balance are allowed — that is the point of the setting.
 	"""
-	if not config:
-		frappe.throw(_("Payable Doctype config missing for {0}.").format(transaction.reference_doctype))
+	is_settled = _is_settled(source_doc)
 
-	status_field = (config.get("status_field") or "").strip()
-	paid_value = (config.get("paid_status_value") or "").strip()
-	link_field = (config.get("link_payment_entry_field") or "").strip()
+	config = _get_payable_config(getattr(source_doc, "doctype", None))
+	amount_field = ((config or {}).get("amount_field") or "").strip()
+	if amount_field:
+		val = getattr(source_doc, amount_field, None)
+		if val is not None and flt(val) > 0:
+			# Never let a configured field resurrect a fully-paid document.
+			return 0.0 if is_settled else flt(val)
 
-	if not (status_field and paid_value):
-		frappe.throw(
-			_("Mapped finalization for {0} requires status_field and paid_status_value to be configured.").format(
-				transaction.reference_doctype
-			),
-		)
+	if cint(getattr(source_doc, "docstatus", 0)) == 1:
+		outstanding = getattr(source_doc, "outstanding_amount", None)
+		if outstanding is not None:
+			return flt(outstanding) if flt(outstanding) > 0 else 0.0
 
-	source = frappe.get_doc(transaction.reference_doctype, transaction.reference_name)
-	updates = {status_field: paid_value}
-	if link_field:
-		updates[link_field] = transaction.name
+	for field in ("rounded_total", "grand_total", "amount"):
+		val = getattr(source_doc, field, None)
+		if val is not None and flt(val) > 0:
+			return flt(val)
+	return 0.0
 
-	source.flags.ignore_permissions = True
-	source.db_set(updates, update_modified=True, notify=True)
 
-	# Optional: submit the source doc when paid_value == "Submitted" on a submittable doctype.
-	if paid_value.lower() == "submitted" and cint(getattr(source, "docstatus", 0)) == 0:
-		try:
-			meta = frappe.get_meta(transaction.reference_doctype)
-			if getattr(meta, "is_submittable", 0):
-				source.reload()
-				source.submit()
-		except Exception:
-			# Submission failure is logged but doesn't roll back the transaction —
-			# the field update already landed.
+def _is_settled(source_doc):
+	"""True when a submitted doc reports a non-positive outstanding balance."""
+	if cint(getattr(source_doc, "docstatus", 0)) != 1:
+		return False
+	outstanding = getattr(source_doc, "outstanding_amount", None)
+	return outstanding is not None and flt(outstanding) <= 0
+
+
+def _write_transaction_reference(transaction):
+	"""Write this transaction's name onto the source doc's reference field.
+
+	Optional, per-doctype: the ``Transaction Reference Field`` on the Payable
+	Documents row names a field on the source doctype that receives the
+	Pinelabs Transaction id (``PLT-…``) once the payment succeeds. Blank (the
+	default) means "don't write anything".
+
+	Called from ``mark_success`` for EVERY finalization path — Payment Entry
+	or not. It used to live inside the status-mapping path, which meant a
+	configured reference field was silently never filled whenever a Payment
+	Entry was created (i.e. the common case).
+
+	Failures here are logged, not raised. The customer has already been
+	charged and the Payment Entry may already be posted; a bad field name in
+	config must not roll the whole SUCCESS back. ``db_set`` is used rather
+	than ``save`` so a submitted source doc can be updated without tripping
+	Frappe's update-after-submit validation.
+	"""
+	config = _get_payable_config(transaction.reference_doctype)
+	link_field = ((config or {}).get("link_payment_entry_field") or "").strip()
+	if not link_field:
+		return
+
+	try:
+		meta = frappe.get_meta(transaction.reference_doctype)
+		if not meta.has_field(link_field):
 			frappe.log_error(
-				frappe.get_traceback(),
-				f"Pinelabs mapped finalization: submit failed for {source.doctype} {source.name}",
+				title="Pinelabs reference field missing",
+				message=(
+					f"Payable Documents row for {transaction.reference_doctype} names "
+					f"Transaction Reference Field '{link_field}', but that field does not "
+					f"exist on the doctype. Payment {transaction.name} succeeded; the "
+					f"reference was not written."
+				),
 			)
+			return
+
+		source = frappe.get_doc(transaction.reference_doctype, transaction.reference_name)
+		source.flags.ignore_permissions = True
+		source.db_set(link_field, transaction.name, update_modified=True, notify=True)
+	except Exception:
+		frappe.log_error(
+			frappe.get_traceback(),
+			f"Pinelabs reference write failed for {transaction.name}",
+		)
 
 
 # ──────────────────────────────────────────────────────────────────────────

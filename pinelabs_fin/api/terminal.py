@@ -39,12 +39,12 @@ import frappe
 from frappe import _
 from frappe.utils import cint, flt, get_datetime, time_diff_in_seconds
 
-# When Pine Labs returns a non-standard ResponseCode for a terminal poll,
-# the txn would otherwise sit PENDING forever and the cron would loop on it.
-# After this many minutes with no movement, mark the txn FAILED so the
-# operator sees a terminal state. Overrideable per-machine via
-# Pinelabs Machine Config.auto_cancel_duration_in_minutes.
-_DEFAULT_AUTO_CANCEL_MINUTES = 5
+# Grace added to the gateway's own auto-cancel timeout to get the app-side
+# age-out (see _auto_cancel_minutes). The terminal cancels at its timeout and
+# the next poll observes that; the foreground dialog polls every ~3s and the
+# cron every 60s, so two minutes is ample headroom for the app to see a
+# gateway-side cancellation before deciding to force one itself.
+AGE_OUT_GRACE_MINUTES = 2
 
 
 @frappe.whitelist()
@@ -65,11 +65,11 @@ def initiate_terminal_payment(
 
 	- ``1`` → always create a PE on success (and run the account-mapping
 	  pre-flight now)
-	- ``0`` → never create a PE; fall back to mapped finalization if the
-	  Payable Documents row configures it, otherwise leave the source doc
-	  untouched
+	- ``0`` → never create a PE; the payment is still recorded on the
+	  Pinelabs Transaction and the source doc is left untouched
 	- omitted / ``None`` → use the row's setting (current behaviour)
 	"""
+	from pinelabs_fin.api import access
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
 	from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
@@ -77,6 +77,13 @@ def initiate_terminal_payment(
 	)
 
 	source_doc = _load_eligible_source(reference_doctype, reference_name)
+	# Settings switches + per-doctype row + permission, all BEFORE the gateway
+	# is contacted. Previously these were enforced only in the browser, so the
+	# endpoint charged cards for doctypes that were switched off and for users
+	# with no rights to the document.
+	access.assert_initiate_allowed(
+		reference_doctype, reference_name, flow="Terminal", source_doc=source_doc
+	)
 	# Fail fast BEFORE we contact Pine Labs — if finalization won't work for
 	# this doctype, the customer should never be asked to tap their card.
 	txn_service.validate_finalization_ready(reference_doctype)
@@ -96,8 +103,11 @@ def initiate_terminal_payment(
 	if resolved_amount <= 0:
 		frappe.throw(_("No outstanding amount on {0} {1}.").format(reference_doctype, reference_name))
 
-	# Don't start a second attempt while one is in flight.
-	existing = txn_service.get_active_for_doc(reference_doctype, reference_name)
+	# Serialize concurrent initiates on this source doc, then refuse a second
+	# attempt while one is in flight. The lock closes the check-then-act window
+	# so a double-click / double request can't create two charges.
+	txn_service.lock_source_for_initiate(reference_doctype, reference_name)
+	existing = txn_service.get_active_for_doc(reference_doctype, reference_name, for_update=True)
 	if existing:
 		frappe.throw(
 			_("A {0} payment ({1}) is already in progress for this document.").format(
@@ -264,10 +274,15 @@ def check_terminal_status(transaction_name: str, create_payment_entry: int | Non
 	Pinelabs Transaction so the finalize path uses it. Omit to leave the
 	stored value (or the Payable Documents config) untouched.
 	"""
+	from pinelabs_fin.api import access
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
 
 	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	# Whoever may take the payment may watch it. Without this, any logged-in
+	# user could read another user's payment records by guessing a PLT- name.
+	# The cron reconciler reaches this as Administrator and bypasses the check.
+	access.assert_txn_access(txn)
 	# Late override — caller can flip the create-PE decision before the
 	# poll triggers mark_success. Stored on the row so the cron/webhook
 	# paths also honor the latest value.
@@ -399,6 +414,7 @@ def retry_failed_terminal_payment(transaction_name: str) -> dict:
 
 	Returns the same 5-key envelope as initiate_terminal_payment.
 	"""
+	from pinelabs_fin.api import access
 	from pinelabs_fin.api.transaction import PINELABS_METHOD_TO_MODE
 
 	if not frappe.db.exists("Pinelabs Transaction", transaction_name):
@@ -406,6 +422,9 @@ def retry_failed_terminal_payment(transaction_name: str) -> dict:
 			_("Pinelabs Transaction {0} does not exist.").format(transaction_name),
 		)
 	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	# Retry starts a REAL new charge, so gate it here as well as inside
+	# initiate_terminal_payment — this refuses before we read the source doc.
+	access.assert_txn_access(txn)
 	if txn.flow_type != "Terminal":
 		frappe.throw(
 			_("Transaction {0} is not a Terminal transaction.").format(transaction_name),
@@ -431,10 +450,13 @@ def retry_failed_terminal_payment(transaction_name: str) -> dict:
 @frappe.whitelist()
 def cancel_terminal_payment(transaction_name: str, reason: str | None = None) -> dict:
 	"""User-driven cancel of an in-flight terminal transaction."""
+	from pinelabs_fin.api import access
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
 
 	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	# Cancelling is destructive to a live payment — same bar as taking it.
+	access.assert_txn_access(txn)
 	if txn.flow_type != "Terminal":
 		frappe.throw(_("Transaction {0} is not a Terminal transaction.").format(transaction_name))
 	if txn.status in ("SUCCESS", "FAILED", "CANCELLED"):
@@ -450,7 +472,7 @@ def cancel_terminal_payment(transaction_name: str, reason: str | None = None) ->
 	cancel_response_code = None
 	if txn.payment_id:
 		client = get_pinelabs_client(machine_name=txn.machine)
-		response = client.cancel_raw(txn.payment_id)
+		response = client.cancel_raw(txn.payment_id, amount=txn.amount)
 		response_data = response.get("data") or {}
 		server_message = response_data.get("ResponseMessage")
 		cancel_response_code = response_data.get("ResponseCode")
@@ -600,7 +622,7 @@ def _attempt_age_out_settlement(txn, last_response_code, last_response_data, las
 		# state transition below.
 		try:
 			cancel_client = get_pinelabs_client(machine_name=txn.machine)
-			cancel_response = cancel_client.cancel_raw(txn.payment_id)
+			cancel_response = cancel_client.cancel_raw(txn.payment_id, amount=txn.amount)
 			cancel_code = (cancel_response.get("data") or {}).get("ResponseCode")
 			if cancel_code not in (0, "0", None):
 				# Regular cancel was rejected — fall back to Force Cancel if
@@ -609,7 +631,7 @@ def _attempt_age_out_settlement(txn, last_response_code, last_response_data, las
 				# Endpoint row, keeping this safe for sites that haven't
 				# opted into the v1.36+ Force Cancel API.
 				try:
-					cancel_client.force_cancel_raw(txn.payment_id)
+					cancel_client.force_cancel_raw(txn.payment_id, amount=txn.amount)
 				except Exception:
 					frappe.log_error(
 						frappe.get_traceback(),
@@ -680,19 +702,16 @@ def _load_eligible_source(reference_doctype, reference_name):
 
 
 def _amount_for(source_doc):
-	# Submitted docs with a real outstanding balance: that's authoritative.
-	# Drafts have outstanding_amount=0 (computed at submit), so for them we
-	# fall back to rounded_total / grand_total / amount so the customer is
-	# charged the correct figure even before the doc is submitted.
-	if cint(getattr(source_doc, "docstatus", 0)) == 1:
-		outstanding = getattr(source_doc, "outstanding_amount", None)
-		if outstanding is not None and flt(outstanding) > 0:
-			return flt(outstanding)
-	for field in ("rounded_total", "grand_total", "amount"):
-		val = getattr(source_doc, field, None)
-		if val is not None and flt(val) > 0:
-			return flt(val)
-	return 0.0
+	"""Thin alias — the resolution rules live in one place for both flows.
+
+	See ``transaction.resolve_payment_amount``: it honours the Payable
+	Documents ``Amount Field`` (which used to be silently ignored) and keeps
+	the settled-document guard that stops a fully-paid invoice being charged
+	again.
+	"""
+	from pinelabs_fin.api import transaction as txn_service
+
+	return txn_service.resolve_payment_amount(source_doc)
 
 
 def _load_pinelabs_mode(mode_of_payment, expected_flows):
@@ -750,12 +769,24 @@ def _txn_age_minutes(txn) -> float:
 
 
 def _auto_cancel_minutes(txn) -> int:
-	"""Per-machine override for auto-cancel age (falls back to the default)."""
-	if not txn.machine:
-		return _DEFAULT_AUTO_CANCEL_MINUTES
-	minutes = frappe.db.get_value(
-		"Pinelabs Machine Config",
-		txn.machine,
-		"auto_cancel_duration_in_minutes",
+	"""How long the APP waits before force-settling a stuck transaction.
+
+	Always the gateway's own auto-cancel timeout plus a grace margin, never
+	an independent number. Pine Labs cancels the transaction at the terminal
+	after ``AutoCancelDurationInMinutes``; the next status poll then reports a
+	terminal state, so in the normal case the app never has to intervene at
+	all. The age-out exists only for when the gateway never returns a
+	definitive answer (unknown ResponseCode, or "TXN UPLOADED" forever).
+
+	Deriving it guarantees the invariant that matters: the app must never give
+	up while the terminal is still legitimately waiting for the customer.
+	Previously this was a hardcoded 5 minutes with a broken machine lookup, so
+	any configured value above 5 — including the 10 / 20 / 100 / 120 that Pine
+	Labs uses in its own documentation examples — made the app fire
+	``cancel`` + ``force_cancel`` mid-transaction.
+	"""
+	from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+		resolve_auto_cancel_minutes,
 	)
-	return cint(minutes) or _DEFAULT_AUTO_CANCEL_MINUTES
+
+	return resolve_auto_cancel_minutes(txn.machine) + AGE_OUT_GRACE_MINUTES

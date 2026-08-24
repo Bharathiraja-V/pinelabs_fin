@@ -55,12 +55,13 @@ def initiate_payment_link(
 	``create_payment_entry`` (optional, ``0`` / ``1``): per-call override of
 	the Payable Documents row's Create Payment Entry setting. ``1`` forces
 	PE creation on success (and runs the account-mapping pre-flight now);
-	``0`` skips PE creation entirely (mapped finalization is used if
-	configured). Omit to use the configured default.
+	``0`` skips PE creation entirely (the payment is still recorded on the
+	Pinelabs Transaction). Omit to use the configured default.
 
 	Returns:
 	  {success, transaction_name, payment_link_url, payment_link_id, message}
 	"""
+	from pinelabs_fin.api import access
 	from pinelabs_fin.api import transaction as txn_service
 
 	print(f"[PineLabs PayByLink] Initiate: reference_doctype={reference_doctype} reference_name={reference_name} flow={flow} expiry_minutes={expiry_minutes}")
@@ -70,6 +71,13 @@ def initiate_payment_link(
 		frappe.throw(_("Unknown flow: {0}").format(flow))
 
 	source_doc = _load_eligible_source(reference_doctype, reference_name)
+	# Settings switches + per-doctype row + permission, all BEFORE Plural is
+	# contacted. Neither the master 'Enabled' switch nor 'Enable Payment Links'
+	# reached this endpoint before — they only hid the button — so a link could
+	# be created and SMS'd to a customer with the integration switched off.
+	access.assert_initiate_allowed(
+		reference_doctype, reference_name, flow="Plural", source_doc=source_doc
+	)
 	# Fail fast BEFORE we ask Plural to deliver a link — if finalization
 	# won't work for this doctype, the customer should never see the link.
 	txn_service.validate_finalization_ready(reference_doctype)
@@ -117,8 +125,10 @@ def initiate_payment_link(
 			+ "</pre>",
 		)
 
-	# Prevent concurrent attempts on the same doc.
-	existing = txn_service.get_active_for_doc(reference_doctype, reference_name)
+	# Serialize concurrent initiates on this source doc, then prevent a second
+	# attempt while one is in flight (closes the check-then-act race window).
+	txn_service.lock_source_for_initiate(reference_doctype, reference_name)
+	existing = txn_service.get_active_for_doc(reference_doctype, reference_name, for_update=True)
 	if existing:
 		frappe.throw(
 			_("A {0} payment ({1}) is already in progress for this document.").format(
@@ -145,10 +155,14 @@ def initiate_payment_link(
 @frappe.whitelist()
 def refresh_payment_link_status(transaction_name: str) -> dict:
 	"""Manual status refresh for admin troubleshooting (webhooks are primary)."""
+	from pinelabs_fin.api import access
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.plural_client import get_plural_client
 
 	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	# Same bar as taking the payment. The cron reconciler runs as
+	# Administrator and bypasses this the way it bypasses every Frappe check.
+	access.assert_txn_access(txn)
 	if txn.flow_type != "Plural":
 		frappe.throw(_("Transaction {0} is not a Plural transaction.").format(transaction_name))
 	if txn.status in ("SUCCESS", "FAILED", "CANCELLED"):
@@ -169,7 +183,7 @@ def refresh_payment_link_status(transaction_name: str) -> dict:
 		return {"success": True, "status": "FAILED", "message": "Source doc deleted"}
 
 	client = get_plural_client()
-	result = client.get_payment_link_status(txn.reference_name)
+	result = client.get_payment_link_status(_sent_merchant_reference(txn))
 	if not result.get("success"):
 		return {"success": False, "status": txn.status, "error": result.get("error")}
 
@@ -246,22 +260,26 @@ def _initiate_payment_link(*, source_doc, amount, customer, flow, expiry_minutes
 	preset_method = (allowed_methods[0] if allowed_methods and len(allowed_methods) == 1 else None)
 	method_label = {"CARD": "CARD", "UPI": "UPI", "NETBANKING": "NB"}.get(preset_method)
 
-	payload = _build_payment_link_payload(
-		merchant_ref=source_doc.name,
-		amount=amount,
-		expiry_minutes=expiry_minutes,
-		customer=customer,
-		allowed_methods=allowed_methods,
-	)
-
+	# Create the transaction FIRST so we have a unique per-attempt id
+	# (txn.name, e.g. PLT-2026-00001). That id — not the invoice name — is the
+	# merchant reference we send to Plural, so two links for the same invoice
+	# never collide on the status-refresh lookup. See _build_payment_link_payload.
 	txn = txn_service.create_transaction(
 		reference_doctype=source_doc.doctype,
 		reference_name=source_doc.name,
 		flow_type="Plural",
 		amount=amount,
 		payment_method=method_label,
-		request_payload=payload,
 		create_payment_entry=create_payment_entry,
+	)
+
+	payload = _build_payment_link_payload(
+		merchant_ref=txn.name,
+		description_ref=source_doc.name,
+		amount=amount,
+		expiry_minutes=expiry_minutes,
+		customer=customer,
+		allowed_methods=allowed_methods,
 	)
 
 	client = get_plural_client()
@@ -272,6 +290,7 @@ def _initiate_payment_link(*, source_doc, amount, customer, flow, expiry_minutes
 			txn,
 			error_message=response.get("error") or _("Failed to create payment link"),
 			response_payload=response.get("raw"),
+			request_payload=payload,
 		)
 		return {"success": False, "transaction_name": txn.name, "error": response.get("error")}
 
@@ -279,6 +298,7 @@ def _initiate_payment_link(*, source_doc, amount, customer, flow, expiry_minutes
 		txn,
 		order_id=response.get("payment_link_id"),
 		response_payload=response.get("raw"),
+		request_payload=payload,
 	)
 	return {
 		"success": True,
@@ -294,12 +314,33 @@ def _initiate_payment_link(*, source_doc, amount, customer, flow, expiry_minutes
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _build_payment_link_payload(*, merchant_ref, amount, expiry_minutes, customer, allowed_methods):
+def _sent_merchant_reference(txn):
+	"""Return the merchant_payment_link_reference actually sent to Plural for this txn.
+
+	New rows send txn.name; rows created before the reference-uniqueness fix sent
+	the invoice name. Reading it back from the stored request_payload keeps the
+	status-refresh lookup querying the same reference the link was registered under.
+	Falls back to txn.name if the payload is missing/unparseable.
+	"""
+	try:
+		payload = frappe.parse_json(txn.request_payload or "{}")
+		ref = (payload or {}).get("merchant_payment_link_reference")
+		if ref:
+			return ref
+	except Exception:
+		pass
+	return txn.name
+
+
+def _build_payment_link_payload(*, merchant_ref, amount, expiry_minutes, customer, allowed_methods, description_ref=None):
+	# merchant_ref is the unique per-attempt id (Pinelabs Transaction name) so
+	# Plural can tell two links for the same invoice apart. description_ref keeps
+	# the human-readable invoice name in the customer-facing description.
 	expiry_iso = add_to_date(get_datetime(), minutes=expiry_minutes).strftime("%Y-%m-%dT%H:%M:%SZ")
 	body = {
 		"merchant_payment_link_reference": merchant_ref,
 		"amount": {"value": round(flt(amount) * 100), "currency": "INR"},
-		"description": f"Payment for {merchant_ref}",
+		"description": f"Payment for {description_ref or merchant_ref}",
 		"expiry_date": expiry_iso,
 		"send_sms": True,
 		"send_email": True,
@@ -405,11 +446,16 @@ def _load_eligible_source(reference_doctype, reference_name):
 
 
 def _amount_for(source_doc):
-	for field in ("outstanding_amount", "grand_total", "amount"):
-		val = getattr(source_doc, field, None)
-		if val is not None:
-			return flt(val)
-	return 0.0
+	"""Thin alias — shared with the Terminal flow so the two can't drift.
+
+	See ``transaction.resolve_payment_amount``. Besides honouring the Payable
+	Documents ``Amount Field`` (previously ignored), this also picks up the
+	``rounded_total`` fallback that the Terminal flow already had and this one
+	was missing.
+	"""
+	from pinelabs_fin.api import transaction as txn_service
+
+	return txn_service.resolve_payment_amount(source_doc)
 
 
 def _settings_default_expiry():

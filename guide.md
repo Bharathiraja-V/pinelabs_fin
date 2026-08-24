@@ -166,7 +166,7 @@ Validation enforced in [pinelabs_settings.py](pinelabs_fin/pinelabs_fin/doctype/
 
 - At most one machine may be `Is Default`. Empty machines table is OK.
 - Plural credentials + Webhook Secret required when payment links enabled. Webhook secret must be ≥ 16 characters.
-- Each Payable Doctype row needs `amount_field`. If "Create Payment Entry" is unchecked, both `status_field` and `paid_status_value` are required.
+- Each Payable Doctype row needs `amount_field`. Unticking "Create Payment Entry" needs no extra configuration.
 - Customer Contact Field Mapping: when `fetch_from` is set, dependent fields must be populated.
 
 `on_update`: busts the cached Plural OAuth token if any of `plural_client_id` / `plural_client_secret` / `plural_base_url` changed.
@@ -205,9 +205,9 @@ One row per ERPNext doctype that can be paid via PineLabs.
 | `enable_pay_on_machine` | Show / hide the "Pay on Machine" button on this doctype |
 | `enable_send_payment_link` | Show / hide the "Send Payment Link" button on this doctype |
 | `amount_field` | **Required.** Currency / Float / Int / Percent field on the source doc that holds the payable amount |
-| `status_field` + `paid_status_value` | Used when `finalize_via_payment_entry = 0` |
+| `link_payment_entry_field` | Optional. Field on the source doctype that receives the Pinelabs Transaction id (`PLT-…`) on success — written whether or not a Payment Entry is created |
 | `link_payment_entry_field` | Optional field to write the PE name back into the source doc |
-| `finalize_via_payment_entry` | When unticked, the app writes `status_field = paid_status_value` instead of creating a PE |
+| `finalize_via_payment_entry` | When unticked, no Payment Entry is posted; the payment is still recorded on the Pinelabs Transaction |
 | Customer Contact Field Mapping | See [section 9](#9-customer-contact-resolution) |
 
 ### 5.5 Pinelabs Transaction (standalone, one-per-attempt)
@@ -337,7 +337,7 @@ For each doctype you want PineLabs to be available on:
 6. **Amount Field = "outstanding_amount"** (or `grand_total` / `amount`).
 7. If you do NOT want a Payment Entry created (custom doctypes, status-field-only flows):
    - Untick **Create Payment Entry**.
-   - Set **Status Field** + **Paid Status Value** (e.g. `status` + `Paid`).
+   - Optionally set **Transaction Reference Field** to store the `PLT-…` id on the source doc.
 8. Configure **Customer Contact Field Mapping** (see [section 9](#9-customer-contact-resolution)).
 
 After saving, hard-reload (Ctrl+Shift+R) any open ERPNext form so `pinelabs_buttons.js` picks up the new gating flags. There is no realtime invalidation on Settings save.
@@ -617,7 +617,7 @@ The form auto-refreshes via realtime when status changes.
 | `Customer email or mobile is required` (Send Payment Link) | The doctype's Customer Contact Field Mapping doesn't resolve, or the customer record has neither | Fill the customer's email / mobile, or fix the mapping. Error includes a resolver trace |
 | Pinelabs Transaction stuck at PENDING after customer paid | Webhook didn't arrive, or arrived and was rejected | Check Webhook Secret matches Plural dashboard. Check `bench start` for `Webhook Received:`. Per-minute cron picks it up within 60 s if scheduler is enabled |
 | Terminal status stuck at PENDING after card tap | Foreground poll missed the terminal state | Reload the form. The 3-layer defense (poll + realtime + 1-min cron) picks it up. Check `response_payload` on the transaction record |
-| Payment Entry not created after success on a custom doctype | ERPNext's PE builder doesn't support arbitrary doctypes | Untick **Create Payment Entry** on the Payable Documents row and set **Status Field** + **Paid Status Value** instead |
+| Payment Entry not created after success on a custom doctype | ERPNext's PE builder doesn't support arbitrary doctypes | Call the API with `create_payment_entry=1` (needs a Customer + Company to resolve), or untick **Create Payment Entry** to record the payment without posting to the ledger |
 | 405 / 401 in bench-start logs at random times | Curl probes / health checks | 405 = GET to POST-only endpoint. 401 = POST to webhook without X-Verify. Both prove the endpoint is reachable |
 
 ---

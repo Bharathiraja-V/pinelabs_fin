@@ -70,9 +70,14 @@ class TestTransactionStateMachine(unittest.TestCase):
 class TestPaymentEntryGuards(unittest.TestCase):
 	"""mark_success() respects the 7 PE creation rules from PHASE_1_PLAN §8."""
 
-	@classmethod
-	def setUpClass(cls):
-		cls._invoice = _make_test_invoice()
+	def setUp(self):
+		# A FRESH invoice per test, not a class-level shared one. mark_success
+		# calls frappe.db.commit() (the customer is already charged, so the PE
+		# must be durable), which means tearDown's rollback cannot undo a PE
+		# posted by an earlier test. Sharing one invoice let the alphabetically
+		# earlier test_existing_pe_… fully pay it, so this class's other tests
+		# then hit the zero-outstanding conflict guard and created no PE at all.
+		self._invoice = _make_test_invoice()
 
 	def tearDown(self):
 		frappe.db.rollback()
@@ -886,8 +891,9 @@ class TestTerminalEdgeCases(unittest.TestCase):
 	def test_upi_reconciliation_fields_captured_on_success(self):
 		"""HostTxnID and VPA must land on the response_payload after parsing
 		so UPI reconciliation queries can read them as named keys."""
-		from pinelabs_fin.api import terminal as terminal_module
 		import json as _json
+
+		from pinelabs_fin.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="333")
 
@@ -945,6 +951,124 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		self.assertIn("Request timeout", reloaded.error_message or "")
 
 
+class TestPluralMerchantReference(unittest.TestCase):
+	"""BUG-02: each Plural payment link uses the unique Pinelabs Transaction name
+	(PLT-...) as its merchant reference — never the invoice name — so two links
+	for the same invoice can be told apart on status refresh.
+	"""
+
+	def setUp(self):
+		self._invoice = _make_test_invoice()
+		# Maps the "PineLabs - Payment Link" Mode of Payment account so the
+		# initiate-time account pre-flight passes.
+		_ensure_default_machine()
+		# The Plural flow is now gated on both Settings switches (previously
+		# neither reached the API), so the fixture has to turn them on.
+		_set_settings(enabled=1, enable_payment_links=1)
+
+	def tearDown(self):
+		frappe.db.rollback()
+
+	@staticmethod
+	def _fake_create(ok=True, link_id="PLINK-1"):
+		if ok:
+			return {
+				"success": True,
+				"payment_link_url": "https://plural.example/pay/x",
+				"payment_link_id": link_id,
+				"raw": {},
+			}
+		return {"success": False, "error": "gateway boom", "raw": {}}
+
+	def test_payload_uses_txn_ref_and_keeps_invoice_in_description(self):
+		from pinelabs_fin.api.plural import _build_payment_link_payload
+
+		body = _build_payment_link_payload(
+			merchant_ref="PLT-2026-00042",
+			description_ref="ACC-SINV-2026-00001",
+			amount=100,
+			expiry_minutes=1440,
+			customer={},
+			allowed_methods=None,
+		)
+		self.assertEqual(body["merchant_payment_link_reference"], "PLT-2026-00042")
+		self.assertEqual(body["description"], "Payment for ACC-SINV-2026-00001")
+
+	def test_two_attempts_same_invoice_get_distinct_references(self):
+		from pinelabs_fin.api import plural
+
+		# First attempt fails at the gateway → txn goes FAILED, so the
+		# active-transaction guard allows a second attempt on the same invoice.
+		with patch(
+			"pinelabs_fin.api.plural_client.PluralClient.create_payment_link",
+			return_value=self._fake_create(ok=False),
+		):
+			r1 = plural.initiate_payment_link(
+				reference_doctype="Sales Invoice",
+				reference_name=self._invoice.name,
+				customer_email="buyer@example.com",
+				customer_mobile="9876543210",
+			)
+		self.assertFalse(r1["success"])
+
+		with patch(
+			"pinelabs_fin.api.plural_client.PluralClient.create_payment_link",
+			return_value=self._fake_create(ok=True, link_id="PLINK-2"),
+		):
+			r2 = plural.initiate_payment_link(
+				reference_doctype="Sales Invoice",
+				reference_name=self._invoice.name,
+				customer_email="buyer@example.com",
+				customer_mobile="9876543210",
+			)
+		self.assertTrue(r2["success"])
+
+		t1 = frappe.get_doc("Pinelabs Transaction", r1["transaction_name"])
+		t2 = frappe.get_doc("Pinelabs Transaction", r2["transaction_name"])
+		ref1 = json.loads(t1.request_payload)["merchant_payment_link_reference"]
+		ref2 = json.loads(t2.request_payload)["merchant_payment_link_reference"]
+
+		# Core of BUG-02: each reference is the txn's own name, they differ, and
+		# neither is the (shared) invoice name.
+		self.assertEqual(ref1, t1.name)
+		self.assertEqual(ref2, t2.name)
+		self.assertNotEqual(ref1, ref2)
+		self.assertNotEqual(ref1, self._invoice.name)
+		self.assertNotEqual(ref2, self._invoice.name)
+
+	def test_status_refresh_queries_by_txn_reference_not_invoice(self):
+		from pinelabs_fin.api import plural
+
+		with patch(
+			"pinelabs_fin.api.plural_client.PluralClient.create_payment_link",
+			return_value=self._fake_create(ok=True, link_id="PLINK-3"),
+		):
+			r = plural.initiate_payment_link(
+				reference_doctype="Sales Invoice",
+				reference_name=self._invoice.name,
+				customer_email="buyer@example.com",
+				customer_mobile="9876543210",
+			)
+		txn_name = r["transaction_name"]
+
+		captured = {}
+
+		def fake_status(merchant_ref):
+			captured["ref"] = merchant_ref
+			return {"success": True, "status": "PENDING", "data": {"status": "PENDING"}}
+
+		with patch(
+			"pinelabs_fin.api.plural_client.PluralClient.get_payment_link_status",
+			side_effect=fake_status,
+		):
+			plural.refresh_payment_link_status(txn_name)
+
+		# The status API must be queried by the reference we actually sent
+		# (the txn name), not the invoice name.
+		self.assertEqual(captured["ref"], txn_name)
+		self.assertNotEqual(captured["ref"], self._invoice.name)
+
+
 # ──────────────────────────────────────────────────────────────────────────
 # Fixtures
 # ──────────────────────────────────────────────────────────────────────────
@@ -956,12 +1080,25 @@ def _make_test_invoice():
 	settings.flags.ignore_mandatory = True
 
 	# Make sure Sales Invoice is in payable_doctypes.
-	if not any(r.doctype_name == "Sales Invoice" for r in (settings.payable_doctypes or [])):
-		settings.append("payable_doctypes", {
+	row = None
+	for candidate in (settings.payable_doctypes or []):
+		if candidate.doctype_name == "Sales Invoice":
+			row = candidate
+			break
+	if row is None:
+		row = settings.append("payable_doctypes", {
 			"doctype_name": "Sales Invoice",
-			"is_enabled": 1,
 			"amount_field": "outstanding_amount",
 		})
+	# Force the switches on whether the row is new or pre-existing. These are
+	# now enforced server-side, and a site's real row may legitimately have
+	# one of them off — which would fail every payment test for a reason that
+	# has nothing to do with what is under test. amount_field is deliberately
+	# left as configured: the test invoice has no taxes, so total /
+	# grand_total / outstanding_amount all agree.
+	row.is_enabled = 1
+	row.enable_pay_on_machine = 1
+	row.enable_send_payment_link = 1
 	settings.save(ignore_permissions=True)
 
 	invoice = frappe.get_doc({
@@ -1048,3 +1185,648 @@ def _ensure_routing_machines():
 				m.is_default = 0
 		settings.flags.ignore_mandatory = True
 		settings.save(ignore_permissions=True)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Settings gates + authorization (api/access.py)
+#
+# Every Pinelabs Settings switch used to be enforced ONLY in the browser, so
+# turning one off hid the button but left the whitelisted endpoint callable.
+# These tests pin each switch to a server-side refusal.
+# ──────────────────────────────────────────────────────────────────────────
+
+
+class _StubDoc:
+	"""Minimal stand-in for a source document (attribute access only)."""
+
+	def __init__(self, **kwargs):
+		self.__dict__.update(kwargs)
+
+
+def _set_payable_row(doctype_name, **fields):
+	"""Set fields on the Payable Documents row for ``doctype_name``.
+
+	Rolled back by each test's tearDown.
+	"""
+	settings = frappe.get_single("Pinelabs Settings")
+	row = None
+	for candidate in (settings.payable_doctypes or []):
+		if candidate.doctype_name == doctype_name:
+			row = candidate
+			break
+	if row is None:
+		row = settings.append("payable_doctypes", {
+			"doctype_name": doctype_name,
+			"is_enabled": 1,
+			"amount_field": "outstanding_amount",
+		})
+	row.update(fields)
+	settings.flags.ignore_mandatory = True
+	settings.save(ignore_permissions=True)
+	frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+	return row
+
+
+def _set_settings(**fields):
+	settings = frappe.get_single("Pinelabs Settings")
+	settings.update(fields)
+	settings.flags.ignore_mandatory = True
+	settings.save(ignore_permissions=True)
+	frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+
+class TestSettingsGates(unittest.TestCase):
+	"""The Settings switches must refuse the API, not just hide the button."""
+
+	def setUp(self):
+		self.invoice = _make_test_invoice()
+		_ensure_default_machine()
+
+	def tearDown(self):
+		frappe.db.rollback()
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	def _initiate_terminal(self):
+		from pinelabs_fin.api import terminal
+
+		return terminal.initiate_terminal_payment(
+			reference_doctype="Sales Invoice",
+			reference_name=self.invoice.name,
+			mode_of_payment="PineLabs - Card",
+		)
+
+	def _initiate_plural(self):
+		from pinelabs_fin.api import plural
+
+		return plural.initiate_payment_link(
+			reference_doctype="Sales Invoice",
+			reference_name=self.invoice.name,
+			customer_email="buyer@example.com",
+			customer_mobile="9876543210",
+		)
+
+	# ── master switch ────────────────────────────────────────────────────
+
+	def test_master_switch_off_blocks_terminal(self):
+		_set_settings(enabled=0)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._initiate_terminal()
+		self.assertIn("not enabled", str(ctx.exception))
+
+	def test_master_switch_off_blocks_payment_link(self):
+		"""The regression: 'enabled' gated Terminal via pinelabs_client but was
+		never read by the Plural flow, so a link was still created and sent."""
+		_set_settings(enabled=0, enable_payment_links=1)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._initiate_plural()
+		self.assertIn("not enabled", str(ctx.exception))
+
+	# ── enable_payment_links ─────────────────────────────────────────────
+
+	def test_payment_links_switch_off_blocks_plural(self):
+		_set_settings(enabled=1, enable_payment_links=0)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._initiate_plural()
+		self.assertIn("Payment Links are not enabled", str(ctx.exception))
+
+	def test_payment_links_switch_off_does_not_block_terminal(self):
+		"""It's a Plural-only switch — the terminal flow must be unaffected."""
+		from pinelabs_fin.api import access
+
+		_set_settings(enabled=1, enable_payment_links=0)
+		# Gate only; the full initiate would need a live terminal.
+		access.assert_integration_enabled("Terminal")
+
+	# ── Payable Documents row ────────────────────────────────────────────
+
+	def test_disabled_payable_row_blocks_both_flows(self):
+		_set_settings(enabled=1, enable_payment_links=1)
+		_set_payable_row("Sales Invoice", is_enabled=0)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._initiate_terminal()
+		self.assertIn("disabled for Sales Invoice", str(ctx.exception))
+		with self.assertRaises(frappe.ValidationError):
+			self._initiate_plural()
+
+	def test_per_flow_toggle_pay_on_machine(self):
+		_set_settings(enabled=1, enable_payment_links=1)
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			enable_pay_on_machine=0, enable_send_payment_link=1,
+		)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._initiate_terminal()
+		self.assertIn("Pay on Machine", str(ctx.exception))
+
+	def test_per_flow_toggle_send_payment_link(self):
+		_set_settings(enabled=1, enable_payment_links=1)
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			enable_pay_on_machine=1, enable_send_payment_link=0,
+		)
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._initiate_plural()
+		self.assertIn("Send Payment Link", str(ctx.exception))
+
+	def test_no_payable_row_stays_permissive(self):
+		"""Documented contract (transaction.validate_finalization_ready case 3):
+		a doctype with NO row is still allowed — consumer apps rely on it."""
+		from pinelabs_fin.api import access
+
+		_set_settings(enabled=1, enable_payment_links=1)
+		# "ToDo" has no Payable Documents row.
+		access.assert_doctype_payable("ToDo", "Terminal")
+		access.assert_doctype_payable("ToDo", "Plural")
+
+
+class TestAuthorizationGates(unittest.TestCase):
+	"""Whitelisted payment endpoints must check permissions."""
+
+	def setUp(self):
+		self.invoice = _make_test_invoice()
+		_ensure_default_machine()
+		_set_settings(enabled=1, enable_payment_links=1)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.db.rollback()
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	def _make_powerless_user(self):
+		email = "pinelabs_noperm@example.com"
+		if not frappe.db.exists("User", email):
+			user = frappe.get_doc({
+				"doctype": "User",
+				"email": email,
+				"first_name": "NoPerm",
+				"send_welcome_email": 0,
+				"roles": [],
+			})
+			user.insert(ignore_permissions=True)
+		return email
+
+	def test_initiate_terminal_refuses_user_without_write_on_source(self):
+		from pinelabs_fin.api import terminal
+
+		frappe.set_user(self._make_powerless_user())
+		with self.assertRaises(frappe.PermissionError):
+			terminal.initiate_terminal_payment(
+				reference_doctype="Sales Invoice",
+				reference_name=self.invoice.name,
+				mode_of_payment="PineLabs - Card",
+			)
+
+	def test_initiate_payment_link_refuses_user_without_write_on_source(self):
+		from pinelabs_fin.api import plural
+
+		frappe.set_user(self._make_powerless_user())
+		with self.assertRaises(frappe.PermissionError):
+			plural.initiate_payment_link(
+				reference_doctype="Sales Invoice",
+				reference_name=self.invoice.name,
+				customer_email="buyer@example.com",
+				customer_mobile="9876543210",
+			)
+
+	def test_txn_scoped_endpoint_refuses_foreign_user(self):
+		"""IDOR: reading someone else's transaction by guessing its PLT- name."""
+		from pinelabs_fin.api import terminal
+		from pinelabs_fin.api import transaction as txn_service
+
+		txn = txn_service.create_transaction(
+			reference_doctype="Sales Invoice",
+			reference_name=self.invoice.name,
+			flow_type="Terminal",
+			amount=100,
+			payment_method="CARD",
+		)
+		frappe.set_user(self._make_powerless_user())
+		with self.assertRaises(frappe.PermissionError):
+			terminal.check_terminal_status(txn.name)
+
+	def test_administrator_bypasses_the_gate(self):
+		"""The cron reconciler runs as Administrator and must keep working."""
+		from pinelabs_fin.api import access
+
+		frappe.set_user("Administrator")
+		access.assert_can_pay("Sales Invoice", self.invoice.name)
+
+
+class TestConfiguredAmountField(unittest.TestCase):
+	"""The Payable Documents 'Amount Field' must actually drive the charge.
+
+	Settings made it mandatory, but nothing ever read it — both flows
+	hardcoded outstanding_amount / grand_total, so a configured field was
+	silently ignored and the customer was charged the full total.
+	"""
+
+	def tearDown(self):
+		frappe.db.rollback()
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	def test_configured_field_wins_over_grand_total(self):
+		from pinelabs_fin.api.transaction import resolve_payment_amount
+
+		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="custom_part_payment")
+		doc = _StubDoc(
+			doctype="Sales Invoice", docstatus=1,
+			custom_part_payment=250, outstanding_amount=1000, grand_total=1000,
+		)
+		self.assertEqual(resolve_payment_amount(doc), 250.0)
+
+	def test_falls_back_when_configured_field_is_empty(self):
+		from pinelabs_fin.api.transaction import resolve_payment_amount
+
+		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="custom_part_payment")
+		doc = _StubDoc(
+			doctype="Sales Invoice", docstatus=1,
+			custom_part_payment=0, outstanding_amount=600, grand_total=1000,
+		)
+		self.assertEqual(resolve_payment_amount(doc), 600.0)
+
+	def test_settled_invoice_still_refused_even_with_configured_field(self):
+		"""The configured field must not resurrect a fully-paid document."""
+		from pinelabs_fin.api.transaction import resolve_payment_amount
+
+		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="custom_part_payment")
+		doc = _StubDoc(
+			doctype="Sales Invoice", docstatus=1,
+			custom_part_payment=250, outstanding_amount=0, grand_total=1000,
+		)
+		self.assertEqual(resolve_payment_amount(doc), 0.0)
+
+	def test_submitted_outstanding_is_authoritative_without_config(self):
+		from pinelabs_fin.api.transaction import resolve_payment_amount
+
+		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="outstanding_amount")
+		doc = _StubDoc(
+			doctype="Sales Invoice", docstatus=1,
+			outstanding_amount=400, grand_total=1000,
+		)
+		self.assertEqual(resolve_payment_amount(doc), 400.0)
+
+	def test_draft_falls_back_to_rounded_total(self):
+		from pinelabs_fin.api.transaction import resolve_payment_amount
+
+		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="outstanding_amount")
+		doc = _StubDoc(
+			doctype="Sales Invoice", docstatus=0,
+			outstanding_amount=0, rounded_total=990, grand_total=987.65,
+		)
+		self.assertEqual(resolve_payment_amount(doc), 990.0)
+
+	def test_both_flows_share_one_resolver(self):
+		"""plural._amount_for used to be a separate, drifted copy."""
+		from pinelabs_fin.api import plural, terminal
+
+		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="custom_part_payment")
+		doc = _StubDoc(
+			doctype="Sales Invoice", docstatus=1,
+			custom_part_payment=125, outstanding_amount=1000, grand_total=1000,
+		)
+		self.assertEqual(terminal._amount_for(doc), 125.0)
+		self.assertEqual(plural._amount_for(doc), 125.0)
+
+
+class TestTransactionReferenceField(unittest.TestCase):
+	"""The Payable Documents 'Transaction Reference Field' must be written on
+	EVERY finalization path.
+
+	It used to be written only inside the (now removed) status-mapping path,
+	so with 'Create Payment Entry' ticked — the common case — a configured
+	reference field was silently never filled.
+	"""
+
+	# A real, writable field on Sales Invoice that isn't used by these tests.
+	REF_FIELD = "remarks"
+
+	def setUp(self):
+		self.invoice = _make_test_invoice()
+		_ensure_default_machine()
+		_set_settings(enabled=1, enable_payment_links=1)
+		# mark_success calls frappe.db.commit() (the customer is already
+		# charged, so the PE must be durable) — which also commits whatever
+		# this test did to the Pinelabs Settings single. tearDown's rollback
+		# cannot undo that, so snapshot the field we mutate and put it back
+		# explicitly. Without this the suite leaves a real reference field
+		# configured on the site and live payments start writing to it.
+		self._original_ref_field = frappe.db.get_value(
+			"Pinelabs Payable Doctype",
+			{"parent": "Pinelabs Settings", "doctype_name": "Sales Invoice"},
+			"link_payment_entry_field",
+		)
+
+	def tearDown(self):
+		frappe.db.rollback()
+		self._restore_ref_field()
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	def _restore_ref_field(self):
+		current = frappe.db.get_value(
+			"Pinelabs Payable Doctype",
+			{"parent": "Pinelabs Settings", "doctype_name": "Sales Invoice"},
+			"link_payment_entry_field",
+		)
+		if current == self._original_ref_field:
+			return
+		_set_payable_row("Sales Invoice", link_payment_entry_field=self._original_ref_field)
+		frappe.db.commit()  # nosemgrep: frappe-manual-commit
+
+	def _make_pending_txn(self, create_payment_entry=None):
+		from pinelabs_fin.api import transaction as txn_service
+
+		txn = txn_service.create_transaction(
+			reference_doctype="Sales Invoice",
+			reference_name=self.invoice.name,
+			flow_type="Terminal",
+			amount=100,
+			payment_method="CARD",
+			create_payment_entry=create_payment_entry,
+		)
+		return txn_service.mark_pending(txn, order_id="ORD-REF-TEST")
+
+	def _ref_value(self):
+		return frappe.db.get_value("Sales Invoice", self.invoice.name, self.REF_FIELD)
+
+	def test_reference_written_on_payment_entry_path(self):
+		"""The regression: PE ticked used to skip the reference write entirely."""
+		from pinelabs_fin.api import transaction as txn_service
+
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			finalize_via_payment_entry=1,
+			link_payment_entry_field=self.REF_FIELD,
+		)
+		txn = self._make_pending_txn()
+		txn = txn_service.mark_success(txn, payment_id="PAY-REF-PE", payment_method="CARD")
+
+		self.assertEqual(txn.status, "SUCCESS")
+		self.assertTrue(txn.payment_entry, "a Payment Entry should have been created")
+		self.assertEqual(self._ref_value(), txn.name)
+
+	def test_reference_written_on_no_payment_entry_path(self):
+		from pinelabs_fin.api import transaction as txn_service
+
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			finalize_via_payment_entry=1,
+			link_payment_entry_field=self.REF_FIELD,
+		)
+		# Per-call override wins over the row's setting.
+		txn = self._make_pending_txn(create_payment_entry=0)
+		txn = txn_service.mark_success(txn, payment_id="PAY-REF-NOPE", payment_method="CARD")
+
+		self.assertEqual(txn.status, "SUCCESS")
+		self.assertFalse(txn.payment_entry, "no Payment Entry should have been created")
+		self.assertEqual(self._ref_value(), txn.name)
+
+	def test_no_reference_field_configured_is_a_no_op(self):
+		from pinelabs_fin.api import transaction as txn_service
+
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			finalize_via_payment_entry=1,
+			link_payment_entry_field=None,
+		)
+		before = self._ref_value()
+		txn = self._make_pending_txn()
+		txn = txn_service.mark_success(txn, payment_id="PAY-REF-NONE", payment_method="CARD")
+
+		self.assertEqual(txn.status, "SUCCESS")
+		self.assertEqual(self._ref_value(), before)
+
+	def test_bad_field_name_does_not_break_success(self):
+		"""The customer has already been charged — a typo in config must not
+		roll back the SUCCESS or the Payment Entry."""
+		from pinelabs_fin.api import transaction as txn_service
+
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			finalize_via_payment_entry=1,
+			link_payment_entry_field="no_such_field_xyz",
+		)
+		txn = self._make_pending_txn()
+		txn = txn_service.mark_success(txn, payment_id="PAY-REF-BAD", payment_method="CARD")
+
+		self.assertEqual(txn.status, "SUCCESS")
+		self.assertTrue(txn.payment_entry)
+
+	def test_mapped_finalization_is_gone(self):
+		"""The status-mapping path and its config keys no longer exist."""
+		from pinelabs_fin.api import transaction as txn_service
+
+		self.assertFalse(hasattr(txn_service, "_apply_mapped_finalization"))
+		config = txn_service._get_payable_config("Sales Invoice")
+		self.assertNotIn("status_field", config)
+		self.assertNotIn("paid_status_value", config)
+		self.assertIn("link_payment_entry_field", config)
+
+	def test_unticking_create_pe_needs_no_extra_config(self):
+		"""Settings used to refuse to save unless status_field + paid_status_value
+		were filled whenever Create Payment Entry was unticked."""
+		_set_payable_row(
+			"Sales Invoice", is_enabled=1,
+			finalize_via_payment_entry=0,
+			link_payment_entry_field=None,
+		)
+		settings = frappe.get_single("Pinelabs Settings")
+		row = next(r for r in settings.payable_doctypes if r.doctype_name == "Sales Invoice")
+		self.assertEqual(cint(row.finalize_via_payment_entry), 0)
+
+
+class TestAutoCancelResolution(unittest.TestCase):
+	"""The gateway timeout and the app-side age-out must never contradict.
+
+	Regression cover for three defects: the app-side lookup queried the
+	Pinelabs Machine Config child table by ``name`` (a random hash) using
+	``machine_name``, so it never matched; the app-side value never read the
+	Settings field at all; and three different hardcoded fallbacks (1 / 3 / 5)
+	were in play for one concept.
+	"""
+
+	MACHINE = "Test Machine"
+
+	def setUp(self):
+		_ensure_default_machine()
+		_ensure_named_machine(self.MACHINE)
+
+	def tearDown(self):
+		frappe.db.rollback()
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	@staticmethod
+	def _set_machine_override(minutes):
+		settings = frappe.get_single("Pinelabs Settings")
+		for m in settings.machines:
+			if m.machine_name == TestAutoCancelResolution.MACHINE:
+				m.auto_cancel_duration_in_minutes = minutes
+		settings.flags.ignore_mandatory = True
+		settings.save(ignore_permissions=True)
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	class _Txn:
+		def __init__(self, machine):
+			self.machine = machine
+
+	def test_default_when_nothing_configured(self):
+		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+			DEFAULT_AUTO_CANCEL_MINUTES,
+			resolve_auto_cancel_minutes,
+		)
+
+		self._set_machine_override(0)
+		_set_settings(auto_cancel_duration_minutes=0)
+		self.assertEqual(resolve_auto_cancel_minutes(self.MACHINE), DEFAULT_AUTO_CANCEL_MINUTES)
+
+	def test_settings_value_is_used(self):
+		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+			resolve_auto_cancel_minutes,
+		)
+
+		self._set_machine_override(0)
+		_set_settings(auto_cancel_duration_minutes=20)
+		self.assertEqual(resolve_auto_cancel_minutes(self.MACHINE), 20)
+
+	def test_machine_override_beats_settings(self):
+		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+			resolve_auto_cancel_minutes,
+		)
+
+		_set_settings(auto_cancel_duration_minutes=20)
+		self._set_machine_override(7)
+		self.assertEqual(resolve_auto_cancel_minutes(self.MACHINE), 7)
+
+	def test_machine_resolved_by_machine_name_not_row_name(self):
+		"""The core bug: Pinelabs Machine Config is a child table, so its
+		`name` is a hash. Looking it up by machine_name always returned None."""
+		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+			resolve_auto_cancel_minutes,
+		)
+
+		self._set_machine_override(9)
+		# The old lookup — by `name` — still finds nothing, proving the row is
+		# not addressable that way and the new resolution is doing real work.
+		self.assertIsNone(
+			frappe.db.get_value(
+				"Pinelabs Machine Config", self.MACHINE, "auto_cancel_duration_in_minutes"
+			)
+		)
+		self.assertEqual(resolve_auto_cancel_minutes(self.MACHINE), 9)
+
+	def test_app_cutoff_always_exceeds_gateway_timeout(self):
+		"""The invariant: the app must never give up before the terminal does.
+		Checked across the full range Pine Labs uses in its own examples."""
+		from pinelabs_fin.api import terminal
+		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+			resolve_auto_cancel_minutes,
+		)
+
+		for configured in (2, 5, 10, 20, 100, 120):
+			self._set_machine_override(configured)
+			gateway = resolve_auto_cancel_minutes(self.MACHINE)
+			app = terminal._auto_cancel_minutes(self._Txn(self.MACHINE))
+			self.assertEqual(gateway, configured)
+			self.assertGreater(
+				app, gateway,
+				f"app cutoff {app} must exceed gateway timeout {gateway}",
+			)
+
+	def test_client_and_age_out_read_the_same_number(self):
+		"""Both timers derive from one value — they cannot drift apart."""
+		from pinelabs_fin.api import terminal
+		from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
+
+		self._set_machine_override(11)
+		client = get_pinelabs_client(machine_name=self.MACHINE)
+		self.assertEqual(client.auto_cancel_duration, 11)
+		self.assertEqual(
+			terminal._auto_cancel_minutes(self._Txn(self.MACHINE)),
+			11 + terminal.AGE_OUT_GRACE_MINUTES,
+		)
+
+	def test_unknown_machine_falls_back_to_settings(self):
+		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+			resolve_auto_cancel_minutes,
+		)
+
+		_set_settings(auto_cancel_duration_minutes=15)
+		self.assertEqual(resolve_auto_cancel_minutes("No Such Machine"), 15)
+		self.assertEqual(resolve_auto_cancel_minutes(None), 15)
+
+
+class TestSecretRedaction(unittest.TestCase):
+	"""Gateway credentials must never reach a log file in cleartext."""
+
+	def test_masks_secret_keys_at_any_depth(self):
+		from pinelabs_fin.api.redact import MASK, redact
+
+		payload = {
+			"MerchantID": "1234",
+			"SecurityToken": "70D7509C-0A90-4938-A7F9-DB99B9B841D9",
+			"nested": {"client_secret": "sh-hh", "Authorization": "Bearer abc.def"},
+			"rows": [{"access_token": "tok"}, {"Amount": 15900}],
+		}
+		out = redact(payload)
+
+		self.assertEqual(out["MerchantID"], "1234")          # non-secrets survive
+		self.assertEqual(out["rows"][1]["Amount"], 15900)
+		self.assertEqual(out["SecurityToken"], MASK)
+		self.assertEqual(out["nested"]["client_secret"], MASK)
+		self.assertEqual(out["nested"]["Authorization"], MASK)
+		self.assertEqual(out["rows"][0]["access_token"], MASK)
+
+	def test_key_spelling_variants_are_caught(self):
+		from pinelabs_fin.api.redact import MASK, redact
+
+		for key in ("client_secret", "clientSecret", "Client-Secret", "SECURITYTOKEN", "x-verify"):
+			self.assertEqual(redact({key: "live"})[key], MASK, key)
+
+	def test_input_is_not_mutated(self):
+		from pinelabs_fin.api.redact import redact
+
+		original = {"SecurityToken": "live-token"}
+		redact(original)
+		self.assertEqual(original["SecurityToken"], "live-token")
+
+	def test_upload_payload_log_line_carries_no_token(self):
+		"""End-to-end: the actual logged string for a real upload payload."""
+		import json as _json
+
+		from pinelabs_fin.api.redact import redact
+
+		_ensure_default_machine()
+		_ensure_named_machine("Test Machine")
+		from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
+
+		client = get_pinelabs_client(machine_name="Test Machine")
+		payload = client._build_transaction_payload(
+			transaction_ref="PLT-TEST-1", amount=100, payment_mode="Card"
+		)
+		self.assertEqual(payload["SecurityToken"], client.security_token)
+		logged = _json.dumps(redact(payload), indent=2)
+		self.assertNotIn(str(client.security_token), logged)
+		self.assertIn("REDACTED", logged)
+
+
+def _ensure_named_machine(machine_name):
+	"""Append an enabled, NON-default machine row if it isn't there already.
+
+	_ensure_default_machine() only seeds a machine when the table is empty, so
+	on a site that already has one (every real site) it is a no-op. Tests that
+	need to address a machine by name have to add their own. is_default stays
+	0 so the "exactly one default machine" validation keeps passing.
+	"""
+	settings = frappe.get_single("Pinelabs Settings")
+	if not any(m.machine_name == machine_name for m in (settings.machines or [])):
+		settings.append("machines", {
+			"machine_name": machine_name,
+			"merchant_id": "MID-TEST",
+			"client_id": "CID-TEST",
+			"security_token": "ST-TEST-SECRET",
+			"store_id": "STORE-1",
+			"enabled": 1,
+			"is_default": 0,
+		})
+		settings.flags.ignore_mandatory = True
+		settings.save(ignore_permissions=True)
+	frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")

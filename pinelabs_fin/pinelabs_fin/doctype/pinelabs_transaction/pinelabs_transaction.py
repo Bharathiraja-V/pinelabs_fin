@@ -173,10 +173,14 @@ class PinelabsTransaction(Document):
 		if old_status == new_status:
 			return
 
-		# Block manual UI edits to SUCCESS — only the transaction service may set it.
-		if new_status == "SUCCESS" and not self.flags.get("pinelabs_internal_transition"):
+		# Every status change must come from the transaction service, which sets
+		# flags.pinelabs_internal_transition. Manual Desk edits (which never set
+		# it) are rejected — including PENDING->FAILED/CANCELLED, which would
+		# otherwise let a live payment be forced to a terminal state and then
+		# "retried", double-charging the customer.
+		if not self.flags.get("pinelabs_internal_transition"):
 			frappe.throw(
-				_("Status SUCCESS may only be set by the Pinelabs transaction service, not manually."),
+				_("Status can only be changed by the Pinelabs transaction service, not manually."),
 			)
 
 		if new_status not in _ALLOWED_TRANSITIONS.get(old_status, set()):

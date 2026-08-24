@@ -1,0 +1,13 @@
+{
+  "base": "http://127.0.0.1:8015",
+  "inv_clean": "ACC-SINV-2026-00006",
+  "inv_active": "ACC-SINV-2026-00007",
+  "inv_paid": "ACC-SINV-2026-00001",
+  "inv_draft": "ACC-SINV-2026-00002",
+  "inv_cancelled": "ACC-SINV-2026-00008",
+  "non_payable_doctype_record": "Pine Demo Customer",
+  "txn_active": "PLT-2026-00004",
+  "txn_reject": "PLT-2026-00005",
+  "txn_fail": "PLT-2026-00006",
+  "txn_with_pe": "PLT-2026-00001"
+}
