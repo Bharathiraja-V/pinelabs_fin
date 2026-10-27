@@ -13,7 +13,7 @@ import frappe
 from frappe import _
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def test_plural_connection() -> dict:
 	"""Try to obtain a Plural OAuth token using the saved credentials.
 

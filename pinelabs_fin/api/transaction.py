@@ -76,38 +76,37 @@ PINELABS_MODES = (*PINELABS_TERMINAL_MODES, PINELABS_PLURAL_MODE)
 def validate_finalization_ready(reference_doctype):
 	"""Refuse to start a payment when the app cannot finish it CLEANLY.
 
-	Three valid configurations:
+	A doctype must have a Payable Documents row (``access.assert_doctype_payable``
+	enforces that first; this repeats the check so the pre-flight stands on its
+	own). Given a row, there are three valid configurations:
+
 	1. reference_doctype is one of PE_NATIVE_DOCTYPES → ERPNext's
-	   ``get_payment_entry`` will build the PE on success. No setup needed.
-	2. A Payable Documents row exists with finalize_via_payment_entry = 0 →
-	   the payment is recorded on the Pinelabs Transaction but no Payment
-	   Entry is posted and the source doc is left untouched (apart from the
-	   optional Transaction Reference Field — see
-	   ``_write_transaction_reference``).
-	3. No Payable Documents row at all → permissive: the payment will
-	   proceed and the Pinelabs Transaction will record SUCCESS, but the
-	   source doc is **not** auto-updated. The caller (custom button,
-	   external system) is responsible for reacting to the
-	   ``pinelabs_txn_update`` realtime event or polling the Pinelabs
-	   Transaction status if they want the source doc to reflect payment.
-
-	The only case that still throws is (4) — a non-PE-native doctype whose
-	Payable Documents row has 'Create Payment Entry' ticked. ERPNext's
-	builder can't handle it, so finalization would fail *after* the customer
-	paid. That's an admin-side error worth surfacing loudly beforehand.
+	   ``get_payment_entry`` builds the PE on success. No further setup.
+	2. The row has finalize_via_payment_entry = 0 → the payment is recorded on
+	   the Pinelabs Transaction but no Payment Entry is posted and the source
+	   doc is left untouched (apart from the optional Transaction Reference
+	   Field — see ``_write_transaction_reference``).
+	3. A non-PE-native doctype whose row still has finalize_via_payment_entry
+	   ticked is REFUSED: ERPNext's builder can't handle it, so finalization
+	   would fail *after* the customer paid. That is an admin-side error worth
+	   surfacing loudly beforehand. (To get a standalone Payment Entry for such
+	   a doctype, untick the box on its row and call the API with
+	   ``create_payment_entry=1``.)
 	"""
-	if reference_doctype in PE_NATIVE_DOCTYPES:
-		return
-
 	config = _get_payable_config(reference_doctype)
 	if not config:
-		# Permissive — see docstring case (3). Payment proceeds; source
-		# doc is not auto-finalized.
+		frappe.throw(
+			_("Pine Labs payments are not configured for {0}. Add it under Pinelabs Settings → Payable Documents first.").format(
+				reference_doctype
+			),
+		)
+
+	if reference_doctype in PE_NATIVE_DOCTYPES:
 		return
 
 	if cint(config.get("finalize_via_payment_entry", 1)):
 		frappe.throw(
-			_("Cannot accept Pine Labs payments on {0}: it is not Sales Invoice / POS Invoice / Payment Request, but its Payable Documents row has 'Create Payment Entry' ticked. ERPNext's Payment Entry builder does not support {0}, so finalization would fail after the customer paid. Fix, pick one: (a) open the row in Pinelabs Settings → Payable Documents and untick 'Create Payment Entry' — the payment is still recorded, no Payment Entry is posted; (b) delete the row entirely to use the permissive path; or (c) call the API with create_payment_entry=1, which builds a standalone Payment Entry for this doctype (it needs a Customer and a Company to resolve).").format(reference_doctype),
+			_("Cannot accept Pine Labs payments on {0}: it is not Sales Invoice / POS Invoice / Payment Request, but its Payable Documents row has 'Create Payment Entry' ticked. ERPNext's Payment Entry builder does not support {0}, so finalization would fail after the customer paid. Fix, pick one: (a) open the row in Pinelabs Settings → Payable Documents and untick 'Create Payment Entry' — the payment is still recorded, no Payment Entry is posted; or (b) leave it unticked and call the API with create_payment_entry=1, which builds a standalone Payment Entry for this doctype (it needs a Customer and a Company to resolve).").format(reference_doctype),
 		)
 
 
@@ -738,7 +737,16 @@ def _create_payment_entry_idempotent(transaction):
 		frappe.log_error(title="Pinelabs PE conflict", message=conflict_msg)
 		return None
 
-	pe = get_payment_entry(transaction.reference_doctype, transaction.reference_name)
+	# A part-payment must allocate only what was charged. Without party_amount
+	# the reference is allocated at the full outstanding while paid_amount is
+	# the charged amount, and ERPNext rejects it ("Difference Amount must be
+	# zero") — leaving a charged customer with no Payment Entry.
+	charged = flt(transaction.amount)
+	pe = get_payment_entry(
+		transaction.reference_doctype,
+		transaction.reference_name,
+		party_amount=charged if 0 < charged < outstanding else None,
+	)
 
 	# Rule 5: explicit fields.
 	pe.mode_of_payment = transaction.mode_of_payment
@@ -1062,57 +1070,53 @@ def _reload(transaction):
 
 
 def _lock_and_reload(transaction):
-	"""Take a row-level lock on the transaction, then return a fresh doc.
+	"""Take a row-level lock on the transaction and return the LATEST row.
 
-	The foreground poll, the realtime-driven cron reconcile, and the webhook
-	can all reach a transition function concurrently. Without locking, two
-	workers can both pass the "is this terminal?" check before either commits,
-	and the loser hits TimestampMismatchError on save. SELECT … FOR UPDATE
-	serializes them: the second caller blocks until the first commits, then
-	loads the doc with the new (terminal) status and the idempotency check
-	at the top of each transition returns early.
+	The foreground poll, the 1-minute cron reconcile, and the webhook can all
+	reach a transition function concurrently. Each starts by loading the doc
+	(often before a slow gateway call), so by the time it reaches the
+	transition its in-memory copy can be stale.
 
-	REPEATABLE-READ caveat: under MariaDB's default isolation, a regular
-	SELECT after the FOR UPDATE still reads from the transaction snapshot
-	(the view captured at the request's first SELECT). That snapshot pre-dates
-	the other writer's commit, so ``frappe.get_doc`` returns a doc with the
-	stale ``modified`` timestamp — and the subsequent ``save()`` fails the
-	optimistic-lock check ("Document has been modified after you have opened
-	it…"). To bypass the snapshot for the timestamp check, re-read
-	``modified`` with FOR UPDATE (which always reads the latest committed
-	version) and stamp it onto the doc. All non-timestamp columns are still
-	read from the snapshot, which is fine — the transition functions overwrite
-	the columns they care about and the save uses the corrected timestamp.
+	``frappe.get_doc(..., for_update=True)`` issues ``SELECT * … FOR UPDATE``.
+	A locking read does not use the REPEATABLE-READ snapshot: it blocks until
+	any competing writer commits and then returns the newest committed row —
+	``status``, ``payment_entry`` and ``modified`` included. The caller that
+	lost the race therefore sees SUCCESS and returns through the idempotency
+	check at the top of each transition, instead of building a second Payment
+	Entry from a snapshot that still said PENDING.
+
+	An earlier version locked ``modified`` only and read every other column
+	from the snapshot; that let ``status``/``payment_entry`` be out of date
+	while the optimistic-lock check still passed.
 	"""
 	name = transaction if isinstance(transaction, str) else transaction.name
-	# Acquire the row lock + read the latest committed `modified` in one shot.
-	# `frappe.db.get_value(..., for_update=True)` does SELECT … FOR UPDATE and
-	# bypasses the REPEATABLE-READ snapshot — so the value here reflects what
-	# the DB actually has, not what our transaction's snapshot remembers.
-	latest_modified = frappe.db.get_value(
-		"Pinelabs Transaction", name, "modified", for_update=True,
-	)
-	doc = frappe.get_doc("Pinelabs Transaction", name)
-	# Override the snapshot's stale `modified` with the real latest one so
-	# Frappe's optimistic-lock check inside save() passes. The lock itself
-	# guarantees no other writer can advance `modified` further until we
-	# release it (at request commit).
-	if latest_modified is not None:
-		doc.modified = latest_modified
-		# Also keep the in-doc cached copy in sync — Frappe's check_if_latest
-		# reads doc.modified and compares against the DB; without updating
-		# this we'd still trip.
-		doc._original_modified = str(latest_modified)
-	return doc
+	return frappe.get_doc("Pinelabs Transaction", name, for_update=True)
 
 
 def _to_json_str(value):
+	"""Serialise a gateway payload for storage, with credentials masked.
+
+	Every request/response payload saved on a Pinelabs Transaction funnels
+	through here. The request payloads carry the terminal ``SecurityToken``
+	(and, on a connection error, the whole client response including that
+	payload), so redacting at this single point keeps credentials out of the
+	row, its Version history, exports and backups.
+	"""
+	from pinelabs_fin.api.redact import redact
+
 	if isinstance(value, str):
-		return value
+		stripped = value.lstrip()
+		if stripped[:1] in ("{", "["):
+			try:
+				value = json.loads(value)
+			except Exception:
+				return value
+		else:
+			return value
 	try:
-		return json.dumps(value, indent=2, default=str)
+		return json.dumps(redact(value), indent=2, default=str)
 	except Exception:
-		return str(value)
+		return str(redact(value))
 
 
 def _truncate_with_ellipsis(text, max_length):

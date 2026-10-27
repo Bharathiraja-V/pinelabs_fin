@@ -206,6 +206,10 @@ def list_doctype_fields(doctype: str) -> dict:
 	reference; mobile/phone for mobile; email for email) so the most likely
 	choice surfaces at the top of the dropdown.
 	"""
+	# These only feed the Pinelabs Settings mapping grid. Without a role gate
+	# any logged-in user could enumerate the field metadata of doctypes they
+	# have no access to.
+	frappe.only_for("System Manager")
 	empty = {
 		"link_fields": [],
 		"mobile_fields": [],
@@ -283,6 +287,10 @@ def get_link_field_target(doctype: str, fieldname: str) -> str:
 	has to pick the linked doctype manually) or anything that isn't a
 	Link-type field.
 	"""
+	# These only feed the Pinelabs Settings mapping grid. Without a role gate
+	# any logged-in user could enumerate the field metadata of doctypes they
+	# have no access to.
+	frappe.only_for("System Manager")
 	if not (doctype and fieldname):
 		return ""
 	try:

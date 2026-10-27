@@ -15,3 +15,13 @@ Drives the Frappe Desk like a user. Covers the UI-possible subset of
 - TC-SM-04 documents BUG-03 (manual PENDING→FAILED is accepted — it should be rejected).
 - Backend/gateway-only cases (webhook, cron, routing, PE internals, concurrency) are NOT in this
   UI suite — see the bug-repro scripts and `pinelabs_bug_report.xlsx`.
+
+## v16 end-to-end run (`test_app_e2e_simulator.py`)
+
+Constants at the top (`SITE`, `SITES_PATH`, `COMPANY`, `CUSTOMER`, `ITEM`, accounts) match the `pine.local` v16 bench.
+Run from `<bench>/sites`: `../env/bin/python ../apps/pinelabs_fin/playwright_tests/test_app_e2e_simulator.py`.
+
+Result on v16: 33 run, 33 pass. The payment-link cases tick `Enable Payment Links` for the run and restore it,
+and give the Plural client the simulator's demo credentials in memory only (nothing saved to Settings).
+The v15 baseline had 4 failures; on v16 they are fixed (concurrent polling, part-payment, over-charge).
+Needs a customer named `No Contact Customer` (no email/mobile) for the contact guard test.

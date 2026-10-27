@@ -76,7 +76,7 @@ class PluralClient:
 			f"[PineLabs PayByLink] Link Request:\n"
 			f"  POST {url}\n"
 			f"  Headers: {json.dumps(redact(headers), indent=2)}\n"
-			f"  Body: {json.dumps(redact(payload), indent=2)}"
+			f"  Body: {json.dumps(redact(payload, pii=True), indent=2)}"
 		)
 		print(req_dump)
 		frappe.logger("pinelabs_paybylink", file_count=5).info(req_dump)
@@ -97,7 +97,7 @@ class PluralClient:
 		resp_dump = (
 			f"[PineLabs PayByLink] Link Response:\n"
 			f"  Status: {response.status_code}\n"
-			f"  Body: {json.dumps(redact(data), indent=2, default=str)}"
+			f"  Body: {json.dumps(redact(data, pii=True), indent=2, default=str)}"
 		)
 		print(resp_dump)
 		frappe.logger("pinelabs_paybylink", file_count=5).info(resp_dump)
@@ -130,7 +130,7 @@ class PluralClient:
 		req_dump = (
 			f"[PineLabs PayByLink] Status Request:\n"
 			f"  GET {url}\n"
-			f"  Headers: {json.dumps(headers, indent=2)}"
+			f"  Headers: {json.dumps(redact(headers), indent=2)}"
 		)
 		print(req_dump)
 		frappe.logger("pinelabs_paybylink", file_count=5).info(req_dump)
@@ -150,7 +150,7 @@ class PluralClient:
 		resp_dump = (
 			f"[PineLabs PayByLink] Status Response:\n"
 			f"  Status: {response.status_code}\n"
-			f"  Body: {json.dumps(redact(data), indent=2, default=str)}"
+			f"  Body: {json.dumps(redact(data, pii=True), indent=2, default=str)}"
 		)
 		print(resp_dump)
 		frappe.logger("pinelabs_paybylink", file_count=5).info(resp_dump)
@@ -169,7 +169,7 @@ class PluralClient:
 	# api package" — config.test_plural_connection still calls
 	# _get_plural_access_token directly via the public alias above.
 
-	def _get_base_url(self) -> str:
+	def _resolve_base_url(self) -> str:
 		"""Resolve the Plural base URL.
 
 		Priority: Settings.plural_base_url (typed by the user) >
@@ -186,6 +186,14 @@ class PluralClient:
 		if site_override:
 			return site_override.rstrip("/")
 		return PLURAL_SANDBOX_URL.rstrip("/")
+
+	def _get_base_url(self) -> str:
+		"""Resolved base URL, refused unless safe to send credentials to."""
+		from pinelabs_fin.api.url_guard import assert_gateway_url
+
+		url = self._resolve_base_url()
+		assert_gateway_url(url, _("Plural API Base URL"))
+		return url
 
 	def _get_credentials(self) -> tuple[str | None, str | None]:
 		"""Resolve Plural credentials with priority: Settings > site_config."""
@@ -241,7 +249,7 @@ class PluralClient:
 		req_dump = (
 			f"[PineLabs PayByLink] Token Request:\n"
 			f"  POST {url}\n"
-			f"  Body: {json.dumps(redact(payload), indent=2)}"
+			f"  Body: {json.dumps(redact(payload, pii=True), indent=2)}"
 		)
 		print(req_dump)
 		frappe.logger("pinelabs_paybylink", file_count=5).info(req_dump)
@@ -256,7 +264,7 @@ class PluralClient:
 		resp_dump = (
 			f"[PineLabs PayByLink] Token Response:\n"
 			f"  Status: {response.status_code}\n"
-			f"  Body: {json.dumps(redact(data), indent=2, default=str)}"
+			f"  Body: {json.dumps(redact(data, pii=True), indent=2, default=str)}"
 		)
 		print(resp_dump)
 		frappe.logger("pinelabs_paybylink", file_count=5).info(resp_dump)

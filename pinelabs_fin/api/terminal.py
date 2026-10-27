@@ -47,7 +47,7 @@ from frappe.utils import cint, flt, get_datetime, time_diff_in_seconds
 AGE_OUT_GRACE_MINUTES = 2
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def initiate_terminal_payment(
 	reference_doctype: str,
 	reference_name: str,
@@ -99,9 +99,26 @@ def initiate_terminal_payment(
 		reference_name=reference_name,
 		create_payment_entry=create_payment_entry,
 	)
-	resolved_amount = flt(amount) if amount else _amount_for(source_doc)
-	if resolved_amount <= 0:
+	# The caller may ask for LESS than the payable amount (a part payment) but
+	# never more: the cap is the document's own payable amount, which also
+	# carries the settled-document guard. A caller-supplied amount used to
+	# replace it outright, so a fully-paid invoice could be charged again and
+	# an open one charged for more than it was worth.
+	payable = flt(_amount_for(source_doc), 2)
+	if payable <= 0:
 		frappe.throw(_("No outstanding amount on {0} {1}.").format(reference_doctype, reference_name))
+	if amount is None or amount == "":
+		resolved_amount = payable
+	else:
+		resolved_amount = flt(amount, 2)
+		if resolved_amount <= 0:
+			frappe.throw(_("Amount must be greater than zero."))
+		if resolved_amount > payable:
+			frappe.throw(
+				_("Amount {0} is more than the {1} payable on {2} {3}.").format(
+					resolved_amount, payable, reference_doctype, reference_name
+				),
+			)
 
 	# Serialize concurrent initiates on this source doc, then refuse a second
 	# attempt while one is in flight. The lock closes the check-then-act window
@@ -209,7 +226,7 @@ def initiate_terminal_payment(
 	return _shape(success=False, txn=txn, response_code=response_code, message=response_data.get("ResponseMessage"))
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def poll_terminal_status(transaction_name: str, create_payment_entry: int | None = None) -> dict:
 	"""Same behaviour as :func:`check_terminal_status`, distinct method name.
 
@@ -262,7 +279,7 @@ def poll_terminal_status(transaction_name: str, create_payment_entry: int | None
 		}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def check_terminal_status(transaction_name: str, create_payment_entry: int | None = None) -> dict:
 	"""Poll Pine Labs for the latest terminal status of a transaction.
 
@@ -278,7 +295,7 @@ def check_terminal_status(transaction_name: str, create_payment_entry: int | Non
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
 
-	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	txn = access.load_transaction_for_user(transaction_name)
 	# Whoever may take the payment may watch it. Without this, any logged-in
 	# user could read another user's payment records by guessing a PLT- name.
 	# The cron reconciler reaches this as Administrator and bypasses the check.
@@ -401,7 +418,7 @@ def check_terminal_status(transaction_name: str, create_payment_entry: int | Non
 	}
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def retry_failed_terminal_payment(transaction_name: str) -> dict:
 	"""One-call retry of a previously failed Terminal payment.
 
@@ -417,14 +434,18 @@ def retry_failed_terminal_payment(transaction_name: str) -> dict:
 	from pinelabs_fin.api import access
 	from pinelabs_fin.api.transaction import PINELABS_METHOD_TO_MODE
 
-	if not frappe.db.exists("Pinelabs Transaction", transaction_name):
-		frappe.throw(
-			_("Pinelabs Transaction {0} does not exist.").format(transaction_name),
-		)
-	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	txn = access.load_transaction_for_user(transaction_name)
 	# Retry starts a REAL new charge, so gate it here as well as inside
 	# initiate_terminal_payment — this refuses before we read the source doc.
 	access.assert_txn_access(txn)
+	# Only a payment that did not take money may be retried. Retrying SUCCESS
+	# (or an in-flight payment) would charge the customer a second time.
+	if txn.status not in ("FAILED", "CANCELLED"):
+		frappe.throw(
+			_("Only a failed or cancelled payment can be retried; {0} is {1}.").format(
+				transaction_name, txn.status
+			),
+		)
 	if txn.flow_type != "Terminal":
 		frappe.throw(
 			_("Transaction {0} is not a Terminal transaction.").format(transaction_name),
@@ -447,14 +468,14 @@ def retry_failed_terminal_payment(transaction_name: str) -> dict:
 	)
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def cancel_terminal_payment(transaction_name: str, reason: str | None = None) -> dict:
 	"""User-driven cancel of an in-flight terminal transaction."""
 	from pinelabs_fin.api import access
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
 
-	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	txn = access.load_transaction_for_user(transaction_name)
 	# Cancelling is destructive to a live payment — same bar as taking it.
 	access.assert_txn_access(txn)
 	if txn.flow_type != "Terminal":
@@ -685,8 +706,12 @@ def _attempt_age_out_settlement(txn, last_response_code, last_response_data, las
 def _load_eligible_source(reference_doctype, reference_name):
 	if not (reference_doctype and reference_name):
 		frappe.throw(_("reference_doctype and reference_name are required."))
-	if not frappe.db.exists(reference_doctype, reference_name):
-		frappe.throw(_("{0} {1} does not exist.").format(reference_doctype, reference_name))
+	# Existence + permission first, with one shared error for both, so a caller
+	# without access cannot learn whether a document exists (or is cancelled /
+	# submitted) from the message.
+	from pinelabs_fin.api import access
+
+	access.assert_can_pay(reference_doctype, reference_name)
 	doc = frappe.get_doc(reference_doctype, reference_name)
 	# Drafts are accepted: mark_success auto-submits the draft before creating
 	# the Payment Entry (see _create_payment_entry_idempotent). Cancelled docs

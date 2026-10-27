@@ -166,7 +166,7 @@ function retry_terminal(frm) {
 		frappe.msgprint({
 			title: __("Cannot retry"),
 			message: __("This transaction has no recognised Mode of Payment ({0}). Use the source document's Pay on Machine button instead.",
-				[frm.doc.payment_method || "—"]),
+				[frappe.utils.escape_html(frm.doc.payment_method || "—")]),
 			indicator: "red",
 		});
 		return;
@@ -181,7 +181,7 @@ function retry_terminal(frm) {
 	}
 	frappe.confirm(
 		__("Retry terminal payment for {0} {1} using {2}?",
-			[frm.doc.reference_doctype, frm.doc.reference_name, mode]),
+			[frappe.utils.escape_html(frm.doc.reference_doctype), frappe.utils.escape_html(frm.doc.reference_name), mode]),
 		() => {
 			frappe.pinelabs.start_terminal_payment(
 				{

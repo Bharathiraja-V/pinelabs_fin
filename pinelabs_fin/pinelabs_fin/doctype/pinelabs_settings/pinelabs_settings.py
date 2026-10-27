@@ -49,6 +49,7 @@ class PinelabsSettings(Document):
 		self._validate_one_default_machine()
 		self._resolve_plural_base_url()
 		self._validate_plural_credentials()
+		self._validate_gateway_urls()
 		self._validate_payable_doctypes()
 
 	def on_update(self):
@@ -95,6 +96,20 @@ class PinelabsSettings(Document):
 		expiry = cint(getattr(self, "payment_link_expiry_minutes", 0))
 		if expiry and expiry <= 0:
 			frappe.throw(_("Payment Link Expiry (Minutes) must be greater than 0."))
+
+	def _validate_gateway_urls(self):
+		"""Refuse gateway URLs that would expose credentials (see url_guard)."""
+		from pinelabs_fin.api.url_guard import assert_gateway_url
+
+		if cint(self.enable_payment_links) and (self.plural_base_url or "").strip():
+			assert_gateway_url(self.plural_base_url, _("Plural API Base URL"))
+		for row in self.api_endpoints or []:
+			if (row.base_api_url or "").strip():
+				assert_gateway_url(
+					row.base_api_url,
+					_("Pine Labs API URL (row {0})").format(row.idx),
+					verify_ssl=bool(cint(row.verify_ssl)),
+				)
 
 	def _resolve_plural_base_url(self):
 		"""Auto-fill plural_base_url when the user leaves it blank.

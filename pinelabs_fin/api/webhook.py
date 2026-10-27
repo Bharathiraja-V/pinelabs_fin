@@ -37,7 +37,7 @@ _FAILED_EVENTS = {"PAYMENT_FAILED", "ORDER_CANCELLED", "ORDER_FAILED", "ORDER_EX
 # the request (401) if the webhook secret is unset or the signature is
 # missing/invalid. This is the standard, secure design for payment-gateway
 # callbacks. Reviewed and justified — not an unreviewed guest endpoint.
-@frappe.whitelist(allow_guest=True)  # nosemgrep: guest-whitelisted-method
+@frappe.whitelist(allow_guest=True, methods=["POST"])  # nosemgrep: guest-whitelisted-method
 def handle_webhook():
 	"""Public entry point. See module docstring for HTTP contract."""
 	original_user = frappe.session.user
@@ -67,14 +67,14 @@ def handle_webhook():
 
 		payload = data.get("data") or {}
 		event_type = data.get("event_type")
-		order_id = (
-			payload.get("order_id")
-			or payload.get("payment_link_id")
-			or payload.get("merchant_order_reference")
-			or payload.get("merchant_payment_link_reference")
-		)
-		if not order_id:
+		# Every identifier Plural may use for this payment. Our own reference
+		# (the PLT-… name we sent as the merchant reference) comes first: it is
+		# the one value we are certain matches a row, whereas ``order_id`` is
+		# Plural's order id and need not equal the payment-link id we stored.
+		candidate_ids = _candidate_ids(payload)
+		if not candidate_ids:
 			return _respond(400, "Missing order_id / merchant reference")
+		order_id = candidate_ids[0]
 
 		# DB-level event dedup. If the same event_id arrives twice (Plural retry,
 		# replay attack, network glitch), the second insert fails on the UNIQUE
@@ -86,10 +86,12 @@ def handle_webhook():
 			_touch_last_sync()
 			return _respond(200, "Duplicate event ignored", success=True)
 
-		txn_name = _find_transaction(order_id)
+		txn_name = _find_transaction(candidate_ids)
 		if not txn_name:
-			_finalize_event(event_row, status="ignored")
-			# 404 keeps Plural from retrying an unrecoverable case.
+			# "failed", not "ignored": the dedup only swallows redeliveries of
+			# events that reached processed/ignored, and an unmatched event may
+			# match once the transaction row is visible / committed.
+			_finalize_event(event_row, status="failed")
 			return _respond(404, f"No Pinelabs Transaction matches {order_id}")
 
 		from pinelabs_fin.api import transaction as txn_service
@@ -103,6 +105,22 @@ def handle_webhook():
 			return _respond(200, "Already processed", success=True)
 
 		decision = _classify(payload, event_type)
+		if decision == "paid" and not _amount_matches(payload, txn):
+			# Signed, but for a different amount than we asked the customer to
+			# pay. Never book it automatically.
+			_log_decision("paid but amount mismatch → refused", txn_name)
+			_finalize_event(event_row, status="failed", pinelabs_transaction=txn_name)
+			return _respond(409, "Paid amount does not match the transaction amount")
+		if decision == "failed" and event_type == "PAYMENT_FAILED":
+			# One payment ATTEMPT failed (e.g. a declined card). A payment link
+			# stays payable, so the customer can try again and succeed; marking
+			# the transaction FAILED (a final state) would make that later
+			# success impossible to book. Final failures arrive as order-level
+			# events or via the status refresh when the link expires.
+			_log_decision("payment attempt failed; link still open", txn_name)
+			_finalize_event(event_row, status="ignored", pinelabs_transaction=txn_name)
+			_touch_last_sync()
+			return _respond(200, "Attempt failure recorded", success=True)
 		if decision == "paid":
 			payment_id = payload.get("payment_id") or payload.get("transaction_id") or order_id
 			payment_method = _extract_method(payload)
@@ -131,7 +149,7 @@ def handle_webhook():
 		# webhook retries all race on the same Pinelabs Transaction row).
 		_log_decision(f"unknown event_type={event_type} status={payload.get('status')}", txn_name)
 		txn = txn_service._lock_and_reload(txn)
-		txn.response_payload = json.dumps(data, indent=2, default=str)
+		txn.response_payload = txn_service._to_json_str(data)
 		txn.flags.pinelabs_internal_transition = True
 		txn.save(ignore_permissions=True)
 		_finalize_event(event_row, status="ignored", pinelabs_transaction=txn_name)
@@ -191,7 +209,11 @@ def _validate_signature_or_throw():
 		hashlib.sha256,
 	).hexdigest()
 
-	if not hmac.compare_digest(signature.lower(), expected.lower()):
+	# Compare as bytes: compare_digest raises TypeError on non-ASCII str, which
+	# would turn a junk header into an unauthenticated 500 + Error Log row.
+	if not hmac.compare_digest(
+		signature.strip().lower().encode("utf-8", "ignore"), expected.lower().encode("utf-8")
+	):
 		frappe.throw(_("Invalid signature"), frappe.AuthenticationError)
 
 
@@ -295,17 +317,55 @@ def _finalize_event(event_doc, *, status, pinelabs_transaction=None):
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def _find_transaction(order_id):
-	"""Match a webhook to a Pinelabs Transaction by order_id, then payment_id, then name."""
-	for filters in (
-		{"order_id": order_id},
-		{"payment_id": order_id},
-		{"name": order_id},
+def _candidate_ids(payload):
+	"""All identifiers in the payload that could name our transaction, in
+	match-priority order, de-duplicated."""
+	out = []
+	for key in (
+		"merchant_order_reference",
+		"merchant_payment_link_reference",
+		"payment_link_id",
+		"order_id",
 	):
-		name = frappe.db.get_value("Pinelabs Transaction", filters, "name")
-		if name:
-			return name
+		value = payload.get(key)
+		if value and str(value) not in out:
+			out.append(str(value))
+	return out
+
+
+def _find_transaction(candidate_ids):
+	"""Match a webhook to a Pinelabs Transaction.
+
+	Tries each candidate id against name, then order_id, then payment_id.
+	"""
+	if isinstance(candidate_ids, str):
+		candidate_ids = [candidate_ids]
+	for candidate in candidate_ids:
+		for filters in (
+			{"name": candidate},
+			{"order_id": candidate},
+			{"payment_id": candidate},
+		):
+			name = frappe.db.get_value("Pinelabs Transaction", filters, "name")
+			if name:
+				return name
 	return None
+
+
+def _amount_matches(payload, txn):
+	"""True unless the payload states an INR amount that differs from the
+	transaction's. Plural reports ``order_amount.value`` in paise. When the
+	payload carries no amount we cannot compare, so the signed event is trusted
+	as before."""
+	from frappe.utils import cint, flt
+
+	amount = payload.get("order_amount") or payload.get("amount")
+	if not isinstance(amount, dict) or amount.get("value") in (None, ""):
+		return True
+	currency = (amount.get("currency") or "INR").upper()
+	if currency != "INR":
+		return False
+	return cint(amount["value"]) == cint(round(flt(txn.amount) * 100))
 
 
 def _classify(payload, event_type):
@@ -342,14 +402,20 @@ def _respond(http_status, message, success=False):
 
 
 def _log_inbound(data):
+	"""Log that a webhook arrived — identifiers only.
+
+	The body carries customer contact details and payment data, and the
+	X-Verify header plus the body is everything needed to replay a delivery,
+	so neither is written to the logs. The full envelope is kept on the
+	Pinelabs Webhook Event row (System Manager only).
+	"""
 	try:
-		dump = (
-			f"[PineLabs PayByLink] Webhook Received:\n"
-			f"  Headers: X-Verify={frappe.request.headers.get('X-Verify')}\n"
-			f"  Body: {json.dumps(data, indent=2, default=str)}"
+		payload = data.get("data") or {}
+		line = (
+			f"[PineLabs PayByLink] Webhook Received: event_type={data.get('event_type')} "
+			f"refs={_candidate_ids(payload)}"
 		)
-		print(dump)
-		frappe.logger("pinelabs_paybylink", file_count=5).info(dump)
+		frappe.logger("pinelabs_paybylink", file_count=5).info(line)
 	except Exception:
 		pass
 

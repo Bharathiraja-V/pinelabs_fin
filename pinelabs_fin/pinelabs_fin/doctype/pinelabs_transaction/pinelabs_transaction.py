@@ -18,6 +18,7 @@ saves. User-driven status edits without that flag are blocked here.
 import frappe
 from frappe import _
 from frappe.model.document import Document
+from frappe.utils import flt
 
 # Allowed forward transitions. Anything not listed is rejected.
 _ALLOWED_TRANSITIONS = {
@@ -41,6 +42,7 @@ class PinelabsTransaction(Document):
 
 	def validate(self):
 		self._lock_flow_type()
+		self._lock_service_owned_fields()
 		self._enforce_status_transition()
 		self._validate_machine()
 		self._enforce_unique_provider_ids()
@@ -159,6 +161,48 @@ class PinelabsTransaction(Document):
 					previous.flow_type, self.flow_type
 				)
 			)
+
+	# Fields only the transaction service may change on an existing row. The
+	# amount drives the Payment Entry; the provider ids and source reference
+	# decide which gateway payment settles which document. Editing any of them
+	# on a live (PENDING) row would let a user re-point a payment at another
+	# invoice, inflate the booked amount, or adopt another payment's id.
+	_SERVICE_OWNED_FIELDS = (
+		"amount",
+		"reference_doctype",
+		"reference_name",
+		"payment_id",
+		"order_id",
+		"machine",
+		"payment_method",
+		"mode_of_payment",
+		"payment_entry",
+		"create_payment_entry_override",
+		"request_payload",
+		"response_payload",
+		"created_at",
+		"completed_at",
+	)
+
+	def _lock_service_owned_fields(self):
+		"""Reject manual edits to service-owned fields (see above)."""
+		if self.is_new() or self.flags.get("pinelabs_internal_transition"):
+			return
+		previous = self.get_doc_before_save()
+		if not previous:
+			return
+		for field in self._SERVICE_OWNED_FIELDS:
+			old, new = previous.get(field), self.get(field)
+			if field == "amount":
+				changed = flt(old, 2) != flt(new, 2)
+			else:
+				changed = (str(old) if old is not None else "") != (str(new) if new is not None else "")
+			if changed:
+				frappe.throw(
+					_("{0} is set by the Pinelabs transaction service and cannot be edited manually.").format(
+						self.meta.get_label(field)
+					),
+				)
 
 	def _enforce_status_transition(self):
 		"""Reject illegal status transitions and manual jumps to SUCCESS."""

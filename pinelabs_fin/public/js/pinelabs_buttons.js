@@ -158,13 +158,14 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 	}
 
 	function refresh_payable_list() {
-		// Fetch the parent Singleton — `frappe.db.get_list` on a child table
-		// silently drops Link/custom fields (returns rows with only `name`),
-		// so we'd never see doctype_name or the per-button flags. Pulling the
-		// parent doc returns the full child rows.
+		// The server resolves the parent Singleton's child rows — fetching
+		// the child table with `frappe.db.get_list` silently drops
+		// Link/custom fields (returns rows with only `name`).
+		// pinelabs_fin.api.access.get_payable_doctypes returns only the
+		// per-doctype switches. Reading the Settings doctype directly is
+		// System Manager–only, so cashiers got a 403 and no buttons.
 		frappe.call({
-			method: "frappe.client.get",
-			args: { doctype: "Pinelabs Settings", name: "Pinelabs Settings" },
+			method: "pinelabs_fin.api.access.get_payable_doctypes",
 		})
 			.then((r) => {
 				const rows = (r && r.message && r.message.payable_doctypes) || [];
@@ -533,7 +534,7 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 					if (!msg.success || !msg.transaction_name) {
 						frappe.msgprint({
 							title: __("Retry failed"),
-							message: msg.message || msg.error || __("Unknown error"),
+							message: frappe.utils.escape_html(String(msg.message || msg.error || __("Unknown error"))),
 							indicator: "red",
 						});
 						try { on_settled("FAILED", transaction_name); } catch (_e) {}
@@ -760,10 +761,12 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 	// Shared
 	// ─────────────────────────────────────────────────────────────────
 
+	// Gateway / exception text is untrusted (it can echo a hostile or tampered
+	// response), and msgprint renders HTML — escape it before display.
 	function show_error(title, message) {
 		frappe.msgprint({
 			title,
-			message: message || __("Unknown error"),
+			message: message ? frappe.utils.escape_html(String(message)) : __("Unknown error"),
 			indicator: "red",
 		});
 	}

@@ -33,11 +33,12 @@ flow's ``_load_eligible_source`` (Terminal accepts drafts and auto-submits
 them at finalize time, Plural requires a submitted doc). Enforcing the
 display hint here would break the documented draft flow.
 
-The **permissive path** is also preserved: a doctype with *no* Payable
-Documents row is still allowed through, matching the contract documented in
-``transaction.validate_finalization_ready`` case (3) that consumer apps
-(e.g. ``fin_pos``) and custom buttons rely on. What is now refused is a row
-that *exists* and is explicitly switched off — previously a no-op.
+There is **no permissive path**: a doctype must have an enabled row in
+Pinelabs Settings → Payable Documents before any payment can be started on it.
+Previously a doctype with no row was let through, which meant any user with
+write access to *any* document type could arm the store's terminal and, with
+``create_payment_entry=1``, have a Payment Entry posted that they could never
+create themselves. Configuration is now the allow-list.
 """
 
 import frappe
@@ -75,17 +76,21 @@ def assert_integration_enabled(flow):
 
 
 def assert_doctype_payable(reference_doctype, flow):
-	"""Refuse when the doctype's Payable Documents row is switched off.
+	"""Refuse unless the doctype has an enabled Payable Documents row.
 
-	No row at all → allowed (the permissive path — see module docstring).
-	Row present   → both ``is_enabled`` and the per-flow toggle must be on.
+	Both ``is_enabled`` and the per-flow toggle must be on. A doctype with no
+	row is refused — configuration is the allow-list.
 	"""
 	from pinelabs_fin.api import transaction as txn_service
 
 	config = txn_service._get_payable_config(reference_doctype)
 	if not config:
-		# Permissive path — caller opted out of configuration entirely.
-		return
+		frappe.throw(
+			_("Pine Labs payments are not configured for {0}. Add it under Pinelabs Settings → Payable Documents first.").format(
+				reference_doctype
+			),
+			title=_("Document Type Not Configured"),
+		)
 
 	if not cint(config.get("is_enabled")):
 		frappe.throw(
@@ -105,25 +110,56 @@ def assert_doctype_payable(reference_doctype, flow):
 		)
 
 
+def _denied(reference_doctype, reference_name):
+	# One message for "does not exist" and "not permitted", so a caller without
+	# access cannot use the error text to probe which documents exist. Frappe's
+	# permission check queues its own explanation ("User X does not have
+	# doctype access … for document Sales Invoice"), which would sit beside ours
+	# in the response and give the game away — drop whatever it queued.
+	frappe.clear_messages()
+	frappe.throw(
+		_("{0} {1} was not found, or you do not have permission to take a payment on it.").format(
+			reference_doctype, reference_name
+		),
+		frappe.PermissionError,
+	)
+
+
 def assert_can_pay(reference_doctype, reference_name, source_doc=None):
-	"""Refuse when the session user may not write to the source document.
+	"""Refuse when the session user may not take a payment on the source document.
 
 	Taking a payment against a document mutates its financial state (a
-	Payment Entry is posted against it, or a status field on it is written),
-	so write permission on the source doc is the right bar. Without this,
-	every ``@frappe.whitelist()`` payment method was callable by any logged-in
-	user against any document — the endpoint URL is identical in every install
-	of this app.
+	Payment Entry is posted against it, or a reference field on it is
+	written), so write permission on the source doc is the bar. A **draft**
+	is auto-submitted when the payment succeeds, so for a draft of a
+	submittable doctype the user also needs submit permission — otherwise a
+	user who can edit but not submit invoices could post one just by taking a
+	payment.
 
 	Administrator and the cron/webhook contexts (which run as Administrator)
 	bypass this the same way they bypass every other Frappe permission check.
 	"""
-	frappe.has_permission(
-		doctype=reference_doctype,
-		ptype="write",
-		doc=source_doc or reference_name,
-		throw=True,
-	)
+	if not frappe.db.exists(reference_doctype, reference_name):
+		_denied(reference_doctype, reference_name)
+
+	doc = source_doc or frappe.get_doc(reference_doctype, reference_name)
+	# print_logs=False: otherwise Frappe queues its own explanatory message
+	# ("User X does not have doctype access … for document Sales Invoice"),
+	# which reaches the client next to ours and defeats the uniform error.
+	if not frappe.permissions.has_permission(reference_doctype, "write", doc=doc, print_logs=False):
+		_denied(reference_doctype, reference_name)
+
+	if (
+		cint(getattr(doc, "docstatus", 0)) == 0
+		and frappe.get_meta(reference_doctype).is_submittable
+		and not frappe.permissions.has_permission(reference_doctype, "submit", doc=doc, print_logs=False)
+	):
+		frappe.throw(
+			_("{0} {1} is a draft and a payment would submit it; you do not have permission to submit {0}.").format(
+				reference_doctype, reference_name
+			),
+			frappe.PermissionError,
+		)
 
 
 def assert_initiate_allowed(reference_doctype, reference_name, *, flow, source_doc=None):
@@ -164,3 +200,68 @@ def assert_txn_access(txn):
 		return
 
 	frappe.has_permission(doctype="Pinelabs Transaction", ptype="read", throw=True)
+
+
+def load_transaction_for_user(transaction_name):
+	"""Load a Pinelabs Transaction by name, enforcing :func:`assert_txn_access`.
+
+	"Does not exist" and "not permitted" share one message, so a caller cannot
+	enumerate ``PLT-…`` names (they are sequential and guessable) by comparing
+	error text.
+	"""
+	if not transaction_name or not frappe.db.exists("Pinelabs Transaction", transaction_name):
+		frappe.throw(
+			_("Pinelabs Transaction {0} was not found, or you do not have permission to access it.").format(
+				transaction_name
+			),
+			frappe.PermissionError,
+		)
+	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	try:
+		assert_txn_access(txn)
+	except frappe.PermissionError:
+		# Re-raise with the SAME message as "not found": the source-document
+		# denial would otherwise name the invoice behind the transaction.
+		frappe.clear_messages()
+		frappe.throw(
+			_("Pinelabs Transaction {0} was not found, or you do not have permission to access it.").format(
+				transaction_name
+			),
+			frappe.PermissionError,
+		)
+	return txn
+
+
+@frappe.whitelist(methods=["POST"])
+def get_payable_doctypes() -> dict:
+	"""Which doctypes get Pine Labs buttons — the only Settings data the UI needs.
+
+	``pinelabs_buttons.js`` used to read the whole ``Pinelabs Settings`` single
+	with ``frappe.client.get``. That doctype is System Manager-only (it holds
+	machine ids and routing), so the cashiers who actually take payments got a
+	403 and no buttons — and the easy "fix" is to grant them Settings read,
+	which exposes everything. This returns just the per-doctype switches.
+
+	The integration master switch and ``enable_payment_links`` are folded in,
+	so a switched-off integration yields no buttons. The endpoint decides what
+	to *draw*; the ``initiate_*`` methods still enforce every rule server-side.
+	"""
+	settings = frappe.get_cached_doc("Pinelabs Settings")
+	if not cint(settings.enabled):
+		return {"payable_doctypes": []}
+
+	links_on = cint(getattr(settings, "enable_payment_links", 0))
+	rows = []
+	for row in settings.payable_doctypes or []:
+		if not (row.doctype_name and cint(row.is_enabled)):
+			continue
+		rows.append(
+			{
+				"doctype_name": row.doctype_name,
+				"is_enabled": 1,
+				"enable_pay_on_machine": cint(row.enable_pay_on_machine),
+				"enable_send_payment_link": 1 if (links_on and cint(row.enable_send_payment_link)) else 0,
+				"show_on_docstatus": row.show_on_docstatus,
+			}
+		)
+	return {"payable_doctypes": rows}

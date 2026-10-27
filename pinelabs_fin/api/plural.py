@@ -30,7 +30,7 @@ _FLOW_TO_METHODS = {
 }
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def initiate_payment_link(
 	reference_doctype: str,
 	reference_name: str,
@@ -152,14 +152,14 @@ def initiate_payment_link(
 	return result
 
 
-@frappe.whitelist()
+@frappe.whitelist(methods=["POST"])
 def refresh_payment_link_status(transaction_name: str) -> dict:
 	"""Manual status refresh for admin troubleshooting (webhooks are primary)."""
 	from pinelabs_fin.api import access
 	from pinelabs_fin.api import transaction as txn_service
 	from pinelabs_fin.api.plural_client import get_plural_client
 
-	txn = frappe.get_doc("Pinelabs Transaction", transaction_name)
+	txn = access.load_transaction_for_user(transaction_name)
 	# Same bar as taking the payment. The cron reconciler runs as
 	# Administrator and bypasses this the way it bypasses every Frappe check.
 	access.assert_txn_access(txn)
@@ -437,8 +437,12 @@ def _find_contact(doc):
 def _load_eligible_source(reference_doctype, reference_name):
 	if not (reference_doctype and reference_name):
 		frappe.throw(_("reference_doctype and reference_name are required."))
-	if not frappe.db.exists(reference_doctype, reference_name):
-		frappe.throw(_("{0} {1} does not exist.").format(reference_doctype, reference_name))
+	# Existence + permission first, with one shared error for both, so a caller
+	# without access cannot learn whether a document exists (or is cancelled /
+	# submitted) from the message.
+	from pinelabs_fin.api import access
+
+	access.assert_can_pay(reference_doctype, reference_name)
 	doc = frappe.get_doc(reference_doctype, reference_name)
 	if cint(getattr(doc, "docstatus", 0)) != 1:
 		frappe.throw(_("{0} {1} must be submitted to send a payment link.").format(reference_doctype, reference_name))

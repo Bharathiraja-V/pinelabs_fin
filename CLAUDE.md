@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`pinelabs_fin` is a **Frappe/ERPNext v15 custom app** that adds Pine Labs payments to any ERPNext document: tap a card on a physical terminal ("Pay on Machine") or send a Plural hosted checkout link ("Send Payment Link"), with the ERPNext Payment Entry created automatically on success.
+`pinelabs_fin` is a **Frappe/ERPNext v16 custom app** (branch `version-16`) that adds Pine Labs payments to any ERPNext document: tap a card on a physical terminal ("Pay on Machine") or send a Plural hosted checkout link ("Send Payment Link"), with the ERPNext Payment Entry created automatically on success.
 
 The app is a directory inside a bench, not a standalone project. Almost every command runs from the **bench root**, not from this app directory:
 
@@ -87,7 +87,7 @@ Two magic flags let internal code through the guards. Both are load-bearing:
 
 ### Concurrency
 
-The foreground browser poll, the 1-minute cron, and the Plural webhook can all race to finalize the same transaction. Every transition starts with `_lock_and_reload()`, which does `SELECT … FOR UPDATE` and then **re-stamps `doc.modified` from that locked read**. That re-stamp is not redundant: under MariaDB's REPEATABLE READ, a plain `get_doc` after the lock still reads the pre-lock snapshot, so `save()` would fail its optimistic-lock check. Read the docstring at `api/transaction.py:980` before touching this.
+The foreground browser poll, the 1-minute cron, and the Plural webhook can all race to finalize the same transaction. Every transition starts with `_lock_and_reload()`, which is `frappe.get_doc(..., for_update=True)` — a locking read (`SELECT … FOR UPDATE`) that bypasses MariaDB's REPEATABLE READ snapshot and returns the **latest committed row**. That is what makes the loser of a race see `SUCCESS` and return through the idempotency check instead of building a second Payment Entry from a stale `PENDING` copy. Do not go back to locking only `modified` and reading the rest from the snapshot; `status` / `payment_entry` go stale.
 
 Every transition function is idempotent (no-ops when already in the target state), which is what makes the racing callers safe.
 
@@ -100,7 +100,7 @@ Which finalization happens depends on the source doctype and a per-call override
 - **PE-native doctypes** (`Sales Invoice`, `POS Invoice`, `Payment Request`) — built by ERPNext's `get_payment_entry`.
 - **Any other doctype with `create_payment_entry=1`** — built by hand in `_build_custom_doctype_pe` (ERPNext's helper doesn't support them).
 - **`finalize_via_payment_entry = 0` on the Payable Documents row** — the payment is recorded on the Pinelabs Transaction, but no Payment Entry is posted and the source doc is left untouched.
-- **No Payable Documents row, no override** — permissive: the transaction records SUCCESS, the source doc is untouched.
+- **No Payable Documents row** — refused. Configuration is the allow-list: `access.assert_doctype_payable` rejects any doctype without an enabled row before the gateway is contacted. (There used to be a "permissive" path; it let any writable doctype arm the terminal.)
 
 The `create_payment_entry` API parameter (`1` / `0` / omitted) overrides the configured default per call and is stored on the transaction row.
 
@@ -133,8 +133,23 @@ Everything lives on the `Pinelabs Settings` **Single** doctype: `machines` (term
 
 **Documentation is inconsistent and lags the code.** `README.md` is accurate and current. `guide.md` is a detailed reference that is **partially stale** — it describes 4 Modes of Payment carrying custom fields (there are 3, with none), plus doctypes and patches (`pinelabs_bank`, `seed_pinelabs_banks.py`, …) that don't exist. `GUIDE.md` (capitalized — a *different* file on this case-sensitive filesystem) documents the **deleted** `pos_endpoints` API end to end and should be treated as obsolete. Trust the code and `README.md` over both.
 
-**Child-table fields vanish from `frappe.db.get_list`.** Querying `Pinelabs Payable Doctype` with `get_list` silently returns `undefined` for Link and custom fields. `pinelabs_buttons.js` deliberately calls `frappe.client.get` on the `Pinelabs Settings` Single and iterates `doc.payable_doctypes` instead. Don't "optimize" that back to `get_list` — per-row toggles stop working silently.
+**Child-table fields vanish from `frappe.db.get_list`.** Querying `Pinelabs Payable Doctype` with `get_list` silently returns `undefined` for Link and custom fields. The button config is therefore resolved server-side from the `Pinelabs Settings` Single's `payable_doctypes` rows and served by `access.get_payable_doctypes`; `pinelabs_buttons.js` consumes that. Don't "optimize" it back to `get_list` — per-row toggles stop working silently.
 
 ## Limitations
 
 INR only. Refunds are not initiated by the app. `Pinelabs Transaction` is named `PLT-.YYYY.-`.
+
+## Security rules (enforced; keep them)
+
+- **Every payment endpoint is `@frappe.whitelist(methods=["POST"])`.** GET skips CSRF; a GET initiate would arm the terminal from a link. The browser uses `frappe.call` (POST).
+- **Amount is capped.** `initiate_terminal_payment(amount=…)` may be *less* than the payable amount, never more (`terminal.py`).
+- **Permission errors are uniform.** `access.assert_can_pay` / `load_transaction_for_user` give the same message for "does not exist" and "not permitted" and clear Frappe's own queued explanation; don't add a differing message or an existence check before the permission check.
+- **Credentials never reach logs or stored payloads.** `redact.redact()` matches secret keys by *substring* (`x-plural-client-secret`); `transaction._to_json_str` redacts everything stored on a Pinelabs Transaction; log lines use `redact(..., pii=True)`. `patches/scrub_stored_credentials.py` cleaned rows written before this.
+- **Gateway URLs** must be `https` with certificate checks (`api/url_guard.py`), enforced on save and again per request. `http` / `verify_ssl=0` only for loopback hosts or `developer_mode`.
+- **Transaction fields are service-owned.** The controller rejects manual edits to amount, payment_id, order_id, reference_*, machine, payload fields unless `flags.pinelabs_internal_transition` is set. System Manager can no longer *create* transactions in Desk.
+- **Webhook**: matches on every identifier in the payload (our `PLT-…` reference first), refuses a "paid" event whose `order_amount` differs from the transaction, and does not mark a payment link FAILED on a single `PAYMENT_FAILED` attempt (the link stays payable).
+- **Buttons** get their config from `access.get_payable_doctypes` (flags only), not from reading `Pinelabs Settings` (System Manager only).
+
+## Tests
+
+`bench --site <site> run-tests --app pinelabs_fin`. `test_phase1.py` builds invoices from `_fixture()` (ERPNext's `_Test …` records if present, else the site's own Company / Customer / sales Item) and snapshots/restores the relevant Pinelabs Settings in `setUpModule` / `tearDownModule`, because `mark_success` commits and a rollback can't undo it. Still: run it on a dev/test site, never production — it leaves invoices and Payment Entries behind.

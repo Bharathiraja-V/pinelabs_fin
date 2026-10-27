@@ -16,6 +16,48 @@ from unittest.mock import patch
 import frappe
 from frappe.utils import cint
 
+# The app commits inside mark_success (the customer has already been charged,
+# so the Payment Entry must survive), which means a test's tearDown rollback
+# cannot undo everything. Settings the tests flip — payment links on, a known
+# webhook secret, the Plural base URL — would otherwise be left committed on
+# whatever site the suite ran against. Snapshot them up front, restore after.
+_SETTINGS_SCALARS = (
+	"enabled",
+	"enable_payment_links",
+	"plural_client_id",
+	"plural_base_url",
+	"payment_link_expiry_minutes",
+	"terminal_routing_mode",
+	"auto_cancel_duration_minutes",
+)
+_SETTINGS_PASSWORDS = ("plural_client_secret", "payment_link_webhook_secret")
+_settings_snapshot = {}
+
+
+def setUpModule():
+	settings = frappe.get_single("Pinelabs Settings")
+	_settings_snapshot.clear()
+	_settings_snapshot["scalars"] = {f: settings.get(f) for f in _SETTINGS_SCALARS}
+	_settings_snapshot["passwords"] = {
+		f: settings.get_password(f, raise_exception=False) for f in _SETTINGS_PASSWORDS
+	}
+
+
+def tearDownModule():
+	if not _settings_snapshot:
+		return
+	frappe.set_user("Administrator")
+	frappe.db.rollback()
+	settings = frappe.get_single("Pinelabs Settings")
+	for field, value in _settings_snapshot["scalars"].items():
+		settings.set(field, value)
+	for field, value in _settings_snapshot["passwords"].items():
+		settings.set(field, value or "")
+	settings.flags.ignore_mandatory = True
+	settings.save(ignore_permissions=True)
+	frappe.db.commit()  # nosemgrep: frappe-manual-commit
+	frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
 
 class TestTransactionStateMachine(unittest.TestCase):
 	"""Pinelabs Transaction controller + transaction.py state transitions."""
@@ -576,12 +618,13 @@ class TestTerminalEdgeCases(unittest.TestCase):
 
 		# Build a fresh DRAFT invoice (no submit) — same shape as _make_test_invoice
 		# but stops at insert().
+		fx = _fixture()
 		draft = frappe.get_doc({
 			"doctype": "Sales Invoice",
-			"customer": "_Test Customer",
-			"company": "_Test Company",
-			"debit_to": "_Test Receivable - _TC",
-			"items": [{"item_code": "_Test Item", "qty": 1, "rate": 100}],
+			"customer": fx["customer"],
+			"company": fx["company"],
+			"debit_to": fx["debit_to"],
+			"items": [{"item_code": fx["item"], "qty": 1, "rate": 100}],
 			"due_date": frappe.utils.nowdate(),
 		})
 		draft.insert(ignore_permissions=True)
@@ -794,7 +837,11 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		original = self._create_pending_txn(plutus_ref=str(plutus_ref))
 		# Stomp the payment_method to a value not in PINELABS_METHOD_TO_MODE.
 		# Use db_set to bypass the doctype's status state machine.
-		frappe.db.set_value("Pinelabs Transaction", original.name, "payment_method", "BITCOIN")
+		frappe.db.set_value(
+			"Pinelabs Transaction",
+			original.name,
+			{"payment_method": "BITCOIN", "status": "FAILED"},
+		)
 		frappe.db.commit()
 
 		with self.assertRaises(frappe.ValidationError) as cm:
@@ -1101,12 +1148,13 @@ def _make_test_invoice():
 	row.enable_send_payment_link = 1
 	settings.save(ignore_permissions=True)
 
+	fx = _fixture()
 	invoice = frappe.get_doc({
 		"doctype": "Sales Invoice",
-		"customer": "_Test Customer",
-		"company": "_Test Company",
-		"debit_to": "_Test Receivable - _TC",
-		"items": [{"item_code": "_Test Item", "qty": 1, "rate": 100}],
+		"customer": fx["customer"],
+		"company": fx["company"],
+		"debit_to": fx["debit_to"],
+		"items": [{"item_code": fx["item"], "qty": 1, "rate": 100}],
 		"due_date": frappe.utils.nowdate(),
 	})
 	invoice.insert(ignore_permissions=True)
@@ -1151,16 +1199,52 @@ def _ensure_default_machine():
 	_ensure_pinelabs_mop_accounts()
 
 
+def _fixture():
+	"""Company / customer / item / receivable account the tests invoice against.
+
+	Prefers ERPNext's ``_Test …`` records when the site has them (a site set up
+	by ``bench run-tests`` for ERPNext), otherwise falls back to whatever the
+	site already has, so the suite runs on an ordinary dev site as well. The
+	item is a non-stock item where possible so no warehouse is needed.
+	"""
+	company = (
+		"_Test Company"
+		if frappe.db.exists("Company", "_Test Company")
+		else frappe.db.get_value("Company", {}, "name")
+	)
+	if not company:
+		raise unittest.SkipTest("No Company on this site; cannot build a Sales Invoice fixture.")
+
+	customer = (
+		"_Test Customer"
+		if frappe.db.exists("Customer", "_Test Customer")
+		else frappe.db.get_value("Customer", {"disabled": 0}, "name")
+	)
+	item = (
+		"_Test Item"
+		if frappe.db.exists("Item", "_Test Item")
+		else (
+			frappe.db.get_value("Item", {"disabled": 0, "is_stock_item": 0, "is_sales_item": 1}, "name")
+			or frappe.db.get_value("Item", {"disabled": 0, "is_sales_item": 1}, "name")
+		)
+	)
+	debit_to = frappe.get_cached_value("Company", company, "default_receivable_account")
+	if not (customer and item and debit_to):
+		raise unittest.SkipTest("Site lacks a Customer / sales Item / receivable account for the fixture.")
+	return {"company": company, "customer": customer, "item": item, "debit_to": debit_to}
+
+
 def _ensure_pinelabs_mop_accounts():
-	"""Map a default account on each PineLabs Mode of Payment for _Test Company.
+	"""Map a default account on each PineLabs Mode of Payment for the fixture company.
 
 	The initiate-time account-mapping pre-flight (transaction.assert_mode_has_account_mapped)
 	would otherwise throw before any of the mocked HTTP calls is reached.
 	"""
-	company = "_Test Company"
-	default_account = frappe.db.get_value(
-		"Account", {"company": company, "account_type": "Bank"}, "name"
-	) or "_Test Bank - _TC"
+	company = _fixture()["company"]
+	default_account = (
+		frappe.db.get_value("Account", {"company": company, "account_type": "Bank", "is_group": 0}, "name")
+		or frappe.db.get_value("Account", {"company": company, "account_type": "Cash", "is_group": 0}, "name")
+	)
 	for mode in ("PineLabs - Card", "PineLabs - UPI", "PineLabs - Payment Link"):
 		if not frappe.db.exists("Mode of Payment", mode):
 			continue
@@ -1348,15 +1432,19 @@ class TestSettingsGates(unittest.TestCase):
 			self._initiate_plural()
 		self.assertIn("Send Payment Link", str(ctx.exception))
 
-	def test_no_payable_row_stays_permissive(self):
-		"""Documented contract (transaction.validate_finalization_ready case 3):
-		a doctype with NO row is still allowed — consumer apps rely on it."""
+	def test_no_payable_row_is_refused(self):
+		"""Configuration is the allow-list: a doctype with NO Payable Documents
+		row cannot start a payment (the old permissive path let any writable
+		doctype arm the terminal)."""
 		from pinelabs_fin.api import access
 
 		_set_settings(enabled=1, enable_payment_links=1)
 		# "ToDo" has no Payable Documents row.
-		access.assert_doctype_payable("ToDo", "Terminal")
-		access.assert_doctype_payable("ToDo", "Plural")
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			access.assert_doctype_payable("ToDo", "Terminal")
+		self.assertIn("not configured", str(ctx.exception))
+		with self.assertRaises(frappe.ValidationError):
+			access.assert_doctype_payable("ToDo", "Plural")
 
 
 class TestAuthorizationGates(unittest.TestCase):
@@ -1850,3 +1938,348 @@ def _ensure_named_machine(machine_name):
 		settings.flags.ignore_mandatory = True
 		settings.save(ignore_permissions=True)
 	frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+
+class TestSecurityHardening(unittest.TestCase):
+	"""Regression tests for the security review fixes."""
+
+	def setUp(self):
+		self.invoice = _make_test_invoice()  # 100.00 outstanding
+		_ensure_default_machine()
+		_set_settings(enabled=1, enable_payment_links=1)
+
+	def tearDown(self):
+		frappe.set_user("Administrator")
+		frappe.db.rollback()
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	def _powerless_user(self):
+		email = "pinelabs_noperm@example.com"
+		if not frappe.db.exists("User", email):
+			frappe.get_doc({
+				"doctype": "User", "email": email, "first_name": "NoPerm",
+				"send_welcome_email": 0, "roles": [],
+			}).insert(ignore_permissions=True)
+		return email
+
+	@staticmethod
+	def _accepted(ref):
+		return {"success": True, "data": {"ResponseCode": 0, "ResponseMessage": "ok", "PlutusTransactionReferenceID": ref}}
+
+	def _initiate(self, **kwargs):
+		from pinelabs_fin.api import terminal
+
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			return_value=self._accepted(int(frappe.generate_hash(length=10), 16) % (10 ** 8)),
+		) as upload:
+			result = terminal.initiate_terminal_payment(
+				reference_doctype="Sales Invoice",
+				reference_name=self.invoice.name,
+				mode_of_payment="PineLabs - Card",
+				**kwargs,
+			)
+		return result, upload
+
+	# ---- amount cap -------------------------------------------------------
+
+	def test_amount_above_outstanding_is_refused_before_the_gateway(self):
+		with patch(
+			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw"
+		) as upload:
+			from pinelabs_fin.api import terminal
+
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				terminal.initiate_terminal_payment(
+					"Sales Invoice", self.invoice.name, "PineLabs - Card", amount=1000
+				)
+		self.assertIn("more than", str(ctx.exception))
+		upload.assert_not_called()
+
+	def test_zero_and_negative_amount_refused(self):
+		from pinelabs_fin.api import terminal
+
+		for bad in (-50, 0.001):
+			with self.assertRaises(frappe.ValidationError):
+				terminal.initiate_terminal_payment(
+					"Sales Invoice", self.invoice.name, "PineLabs - Card", amount=bad
+				)
+
+	def test_part_payment_below_outstanding_is_allowed(self):
+		result, _ = self._initiate(amount=40)
+		self.assertTrue(result["success"])
+		self.assertEqual(
+			frappe.db.get_value("Pinelabs Transaction", result["transaction_name"], "amount"), 40
+		)
+
+	# ---- retry ------------------------------------------------------------
+
+	def test_retry_refused_unless_failed_or_cancelled(self):
+		from pinelabs_fin.api import terminal
+
+		result, _ = self._initiate()
+		with self.assertRaises(frappe.ValidationError) as ctx:  # PENDING
+			terminal.retry_failed_terminal_payment(result["transaction_name"])
+		self.assertIn("Only a failed or cancelled", str(ctx.exception))
+
+	# ---- permissions ------------------------------------------------------
+
+	def test_missing_and_forbidden_documents_are_indistinguishable(self):
+		from pinelabs_fin.api import terminal
+
+		frappe.set_user(self._powerless_user())
+		messages = []
+		for name in (self.invoice.name, "ACC-SINV-DOES-NOT-EXIST"):
+			with self.assertRaises(frappe.PermissionError) as ctx:
+				terminal.initiate_terminal_payment("Sales Invoice", name, "PineLabs - Card")
+			messages.append(str(ctx.exception).replace(name, "<doc>"))
+		self.assertEqual(messages[0], messages[1])
+
+	def test_unknown_transaction_and_forbidden_transaction_look_alike(self):
+		from pinelabs_fin.api import terminal
+		from pinelabs_fin.api import transaction as txn_service
+
+		txn = txn_service.create_transaction(
+			reference_doctype="Sales Invoice", reference_name=self.invoice.name,
+			flow_type="Terminal", amount=100, payment_method="CARD",
+		)
+		frappe.set_user(self._powerless_user())
+		seen = []
+		for name in (txn.name, "PLT-1999-99999"):
+			with self.assertRaises(frappe.PermissionError) as ctx:
+				terminal.check_terminal_status(name)
+			seen.append(str(ctx.exception).replace(name, "<txn>"))
+		self.assertEqual(seen[0], seen[1])
+
+	def test_settings_metadata_endpoints_are_system_manager_only(self):
+		from pinelabs_fin.api import customer_contact
+
+		frappe.set_user(self._powerless_user())
+		with self.assertRaises(frappe.PermissionError):
+			customer_contact.list_doctype_fields("User")
+		with self.assertRaises(frappe.PermissionError):
+			customer_contact.get_link_field_target("User", "role_profile_name")
+
+	def test_button_config_endpoint_works_without_settings_access(self):
+		"""Cashiers cannot read Pinelabs Settings, but must still get buttons."""
+		from pinelabs_fin.api import access
+
+		frappe.set_user(self._powerless_user())
+		with self.assertRaises(frappe.PermissionError):
+			frappe.get_doc("Pinelabs Settings").check_permission("read")
+		out = access.get_payable_doctypes()
+		self.assertIn("payable_doctypes", out)
+		for row in out["payable_doctypes"]:  # flags only, nothing sensitive
+			self.assertLessEqual(
+				set(row),
+				{"doctype_name", "is_enabled", "enable_pay_on_machine", "enable_send_payment_link", "show_on_docstatus"},
+			)
+
+	def test_payment_endpoints_accept_post_only(self):
+		from pinelabs_fin.api import access, config, plural, terminal, webhook
+
+		for fn in (
+			terminal.initiate_terminal_payment, terminal.poll_terminal_status,
+			terminal.check_terminal_status, terminal.retry_failed_terminal_payment,
+			terminal.cancel_terminal_payment, plural.initiate_payment_link,
+			plural.refresh_payment_link_status, config.test_plural_connection,
+			webhook.handle_webhook, access.get_payable_doctypes,
+		):
+			self.assertEqual(
+				frappe.allowed_http_methods_for_whitelisted_func[fn], ["POST"], fn.__name__
+			)
+
+	# ---- transaction integrity -------------------------------------------
+
+	def test_service_owned_fields_cannot_be_edited_by_hand(self):
+		result, _ = self._initiate()
+		txn = frappe.get_doc("Pinelabs Transaction", result["transaction_name"])
+		for field, value in (("amount", 99999), ("payment_id", "someone-elses"), ("reference_name", "OTHER")):
+			doc = frappe.get_doc("Pinelabs Transaction", txn.name)
+			doc.set(field, value)
+			with self.assertRaises(frappe.ValidationError, msg=field):
+				doc.save(ignore_permissions=True)
+
+	def test_lock_and_reload_returns_the_latest_row(self):
+		"""A stale in-memory copy must not be trusted: the SUCCESS written by a
+		competing worker has to win, and no second Payment Entry may be built."""
+		from pinelabs_fin.api import transaction as txn_service
+
+		result, _ = self._initiate()
+		stale = frappe.get_doc("Pinelabs Transaction", result["transaction_name"])
+		self.assertEqual(stale.status, "PENDING")
+		frappe.db.set_value("Pinelabs Transaction", stale.name, "status", "SUCCESS")
+
+		fresh = txn_service.mark_success(stale, payment_id="whatever")
+		self.assertEqual(fresh.status, "SUCCESS")
+		self.assertFalse(fresh.payment_entry)  # idempotent return: nothing built
+
+	# ---- stored payloads --------------------------------------------------
+
+	def test_stored_payloads_never_contain_the_security_token(self):
+		from pinelabs_fin.api.transaction import _to_json_str
+
+		token = "70D7509C-0A90-4938-A7F9-DB99B9B841D9"
+		for value in (
+			{"SecurityToken": token, "Amount": 100},
+			json.dumps({"request_payload": {"SecurityToken": token}}),
+			{"success": False, "request_payload": {"SecurityToken": token}},
+		):
+			stored = _to_json_str(value)
+			self.assertNotIn(token, stored)
+			self.assertIn("REDACTED", stored)
+		self.assertIn("100", _to_json_str({"SecurityToken": token, "Amount": 100}))
+
+	def test_plural_header_secret_is_redacted(self):
+		from pinelabs_fin.api.redact import MASK, redact
+
+		out = redact({"x-plural-client-secret": "s3", "x-plural-client-id": "cid", "Authorization": "Bearer t"})
+		self.assertEqual(out["x-plural-client-secret"], MASK)
+		self.assertEqual(out["Authorization"], MASK)
+		self.assertEqual(out["x-plural-client-id"], "cid")
+
+	def test_customer_contact_masked_only_when_asked(self):
+		from pinelabs_fin.api.redact import MASK, redact
+
+		body = {"customer": {"email_id": "a@b.com", "mobile_number": "9999999999"}}
+		self.assertEqual(redact(body)["customer"]["email_id"], "a@b.com")
+		self.assertEqual(redact(body, pii=True)["customer"]["email_id"], MASK)
+		self.assertEqual(redact(body, pii=True)["customer"]["mobile_number"], MASK)
+
+
+class TestGatewayUrlGuard(unittest.TestCase):
+	def test_rules(self):
+		from pinelabs_fin.api.url_guard import assert_gateway_url
+
+		# allowed
+		assert_gateway_url("https://api.pluralpay.in", "u")
+		assert_gateway_url("http://127.0.0.1:5000", "u", verify_ssl=False)  # local simulator
+		assert_gateway_url("http://localhost:5000", "u")
+		# refused
+		for url, verify in (
+			("http://evil.example.com", True),          # plain http, remote
+			("https://evil.example.com", False),        # TLS verification off, remote
+			("https://user:pw@api.pluralpay.in", True),  # credentials in URL
+			("ftp://api.pluralpay.in", True),
+			("not a url", True),
+			("", True),
+		):
+			with self.assertRaises(frappe.ValidationError, msg=url):
+				assert_gateway_url(url, "u", verify_ssl=verify)
+
+	def test_settings_refuse_an_insecure_endpoint_row(self):
+		settings = frappe.get_single("Pinelabs Settings")
+		settings.append("api_endpoints", {
+			"endpoints_name": "bad", "base_api_url": "http://evil.example.com",
+			"upload_transaction_endpoint": "/u", "get_status_endpoint": "/s",
+			"cancel_transaction_endpoint": "/c", "verify_ssl": 1,
+		})
+		settings.flags.ignore_mandatory = True
+		try:
+			with self.assertRaises(frappe.ValidationError):
+				settings.save(ignore_permissions=True)
+		finally:
+			frappe.db.rollback()
+			frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+
+class TestWebhookHardening(unittest.TestCase):
+	SECRET = "test-secret-1234567890abcdef"
+
+	def setUp(self):
+		self.invoice = _make_test_invoice()
+		settings = frappe.get_single("Pinelabs Settings")
+		settings.enabled = 1
+		settings.enable_payment_links = 1
+		settings.payment_link_webhook_secret = self.SECRET
+		settings.flags.ignore_mandatory = True
+		settings.save(ignore_permissions=True)
+
+	def tearDown(self):
+		frappe.db.rollback()
+		frappe.local.request = None
+		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
+
+	def _post(self, body, signature=None):
+		raw = json.dumps(body)
+		if signature is None:
+			signature = hmac.new(self.SECRET.encode(), raw.encode(), hashlib.sha256).hexdigest()
+
+		class _Req:
+			method = "POST"
+			headers = {"X-Verify": signature}
+
+			def get_json(self_inner):
+				return json.loads(raw)
+
+			def get_data(self_inner, as_text=False):
+				return raw if as_text else raw.encode("utf-8")
+
+		frappe.local.request = _Req()
+		from pinelabs_fin.api import webhook
+
+		return webhook.handle_webhook()
+
+	def _plural_txn(self, amount=100):
+		from pinelabs_fin.api import transaction as txn_service
+
+		txn = txn_service.create_transaction(
+			reference_doctype="Sales Invoice", reference_name=self.invoice.name,
+			flow_type="Plural", amount=amount,
+		)
+		return txn_service.mark_pending(txn, order_id="v1-pl-" + frappe.generate_hash(length=10))
+
+	def test_matches_on_our_merchant_reference_when_order_id_differs(self):
+		"""Plural's ``order_id`` is its own order id, not the payment-link id we
+		stored — the PLT- reference in the payload must still find the row."""
+		from pinelabs_fin.api import webhook
+
+		txn = self._plural_txn()
+		payload = {"order_id": "v1-SIM-O-unrelated", "merchant_order_reference": txn.name}
+		self.assertEqual(webhook._find_transaction(webhook._candidate_ids(payload)), txn.name)
+
+	def test_candidate_ids_prefers_our_reference_and_dedupes(self):
+		from pinelabs_fin.api import webhook
+
+		ids = webhook._candidate_ids({
+			"order_id": "o1", "merchant_order_reference": "PLT-1", "payment_link_id": "o1",
+		})
+		self.assertEqual(ids, ["PLT-1", "o1"])
+
+	def test_non_ascii_signature_is_a_clean_401_not_a_crash(self):
+		result = self._post({"event_type": "X", "data": {"order_id": "y"}}, signature="é" * 64)
+		self.assertFalse(result["success"])
+		self.assertIn("signature", result["message"].lower())
+
+	def test_amount_mismatch_is_not_booked(self):
+		from pinelabs_fin.api import webhook
+
+		txn = self._plural_txn(amount=100)
+		self.assertTrue(webhook._amount_matches({"order_amount": {"value": 10000, "currency": "INR"}}, txn))
+		self.assertFalse(webhook._amount_matches({"order_amount": {"value": 1, "currency": "INR"}}, txn))
+		self.assertFalse(webhook._amount_matches({"order_amount": {"value": 10000, "currency": "USD"}}, txn))
+		self.assertTrue(webhook._amount_matches({}, txn))  # no amount stated -> cannot compare
+
+		result = self._post({
+			"event_type": "ORDER_PROCESSED",
+			"data": {"merchant_order_reference": txn.name, "status": "PROCESSED",
+					"order_amount": {"value": 1, "currency": "INR"}},
+		})
+		self.assertFalse(result["success"])
+		self.assertEqual(frappe.db.get_value("Pinelabs Transaction", txn.name, "status"), "PENDING")
+
+	def test_declined_attempt_leaves_a_payment_link_open(self):
+		txn = self._plural_txn()
+		result = self._post({
+			"event_type": "PAYMENT_FAILED",
+			"data": {"merchant_order_reference": txn.name, "status": "FAILED"},
+		})
+		self.assertTrue(result["success"])
+		self.assertEqual(frappe.db.get_value("Pinelabs Transaction", txn.name, "status"), "PENDING")
+
+	def test_unmatched_event_stays_retryable(self):
+		result = self._post({"event_type": "ORDER_PROCESSED", "data": {"order_id": "no-such", "event_id": "ev-unmatched-1"}})
+		self.assertFalse(result["success"])
+		self.assertEqual(
+			frappe.db.get_value("Pinelabs Webhook Event", {"event_id": "ev-unmatched-1"}, "status"), "failed"
+		)

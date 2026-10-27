@@ -123,6 +123,12 @@ class PineLabsClient:
 		endpoint_verify_ssl = getattr(active_endpoint, "verify_ssl", None)
 		self.verify_ssl = True if endpoint_verify_ssl is None else bool(cint(endpoint_verify_ssl))
 
+		# Credentials go to this URL on every call — refuse anything that is not
+		# https with certificate checks (loopback / developer_mode excepted).
+		from pinelabs_fin.api.url_guard import assert_gateway_url
+
+		assert_gateway_url(self.base_url, _("Pine Labs API URL"), verify_ssl=self.verify_ssl)
+
 		# Store endpoint paths
 		self.upload_endpoint = (
 			getattr(active_endpoint, "upload_transaction_endpoint", None)
@@ -294,7 +300,7 @@ class PineLabsClient:
 			f"HTTP Status={response.status_code}, "
 			f"Has Data={bool(response_data)}, "
 			f"Response Keys={list(response_data.keys()) if isinstance(response_data, dict) else 'N/A'}, "
-			f"Full Response={json.dumps(response_data, indent=2) if response_data else 'Empty'}"
+			f"Full Response={json.dumps(redact(response_data, pii=True), indent=2, default=str) if response_data else 'Empty'}"
 		)
 		return {
 			"success": response.status_code == 200,

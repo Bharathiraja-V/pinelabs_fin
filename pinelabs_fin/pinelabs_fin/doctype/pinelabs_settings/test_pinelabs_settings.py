@@ -8,8 +8,8 @@ The substantive coverage for the Settings flow lives in
 This module is kept so Frappe's test discovery has a per-doctype hook.
 """
 
-from frappe.tests.utils import FrappeTestCase
+from frappe.tests import IntegrationTestCase
 
 
-class TestPinelabsSettings(FrappeTestCase):
+class TestPinelabsSettings(IntegrationTestCase):
 	pass

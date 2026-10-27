@@ -10,7 +10,7 @@
 
 Pine Labs payment integration for Frappe & ERPNext — take terminal payments or send hosted payment links straight from any invoice, with the Payment Entry created automatically when the customer pays. 
 
-![ERPNext 15](https://img.shields.io/badge/ERPNext-15-blue) ![Frappe 15](https://img.shields.io/badge/Frappe-15-orange) ![License MIT](https://img.shields.io/badge/license-MIT-lightgrey)
+![ERPNext 16](https://img.shields.io/badge/ERPNext-16-blue) ![Frappe 16](https://img.shields.io/badge/Frappe-16-orange) ![License MIT](https://img.shields.io/badge/license-MIT-lightgrey)
 
 </div>
 
@@ -218,13 +218,13 @@ pinelabs_fin.api.terminal.check_terminal_status(
 
 ### `create_payment_entry`
 
-A per-call override of the Payable Documents row's `Create Payment Entry` setting. Useful when calling the APIs from your own custom button on a doctype that doesn't have a Payable Documents row (or has one with `Create Payment Entry` unticked).
+A per-call override of the Payable Documents row's `Create Payment Entry` setting. Useful when calling the APIs from your own custom button on a doctype whose Payable Documents row has `Create Payment Entry` unticked. The doctype **must** have an enabled Payable Documents row — payments are refused for any doctype that isn't configured.
 
 | Value | Effect |
 |---|---|
 | `1` | Force PE creation on success. Runs the account-mapping + customer-resolution pre-flight before contacting Pine Labs |
 | `0` | Skip PE creation. The payment is still recorded on the Pinelabs Transaction; the source doc is left untouched |
-| omitted / `None` | Use the Payable Documents row's setting (or "no PE" if the source doctype isn't PE-native and has no row) |
+| omitted / `None` | Use the Payable Documents row's setting |
 
 For a custom doctype with `create_payment_entry=1`, the app builds the PE manually since ERPNext's `get_payment_entry` helper only supports Sales Invoice / POS Invoice / Payment Request. The source doctype should expose a `customer` Link field (or fall back to ERPNext's Default Customer in Global Defaults) so `party_type = Customer` can be set on the PE.
 
@@ -265,8 +265,8 @@ frappe.pinelabs.start_payment_link(
 
 ## Dependencies
 
-- Frappe v15
-- ERPNext v15
+- Frappe v16
+- ERPNext v16
 - Python 3.10+
 - MariaDB 10.6+ with InnoDB
 
