@@ -1,4 +1,4 @@
-# pinelabs_fin — Work Report
+# pinelabs_finstein — Work Report
 
 **Period:** 2026‑07‑14 → 2026‑07‑22 · **Branch:** `develop` (uncommitted) · **Site:** `pine.local`
 

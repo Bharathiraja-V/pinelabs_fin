@@ -33,8 +33,8 @@ def add(_id, mod, title, typ, prio, pre, steps, data, exp):
 
 # ── A. INSTALLATION & SEED ───────────────────────────────────────────────
 add("SETUP-01","Install & Seed","Fresh install seeds 3 Modes of Payment","Happy","High",
-    "Clean site without pinelabs_fin.",
-    "1. Install app: bench --site <s> install-app pinelabs_fin.\n2. Open Mode of Payment list.",
+    "Clean site without pinelabs_finstein.",
+    "1. Install app: bench --site <s> install-app pinelabs_finstein.\n2. Open Mode of Payment list.",
     "—",
     "'PineLabs - Card', 'PineLabs - UPI', 'PineLabs - Payment Link' exist, all Enabled, type Bank.")
 add("SETUP-02","Install & Seed","Upgrade migrate seeds modes idempotently","Happy","Medium",
@@ -686,7 +686,7 @@ notes = [
     "behavior deviates — those cases are expected to FAIL until the bug is fixed.",
     "Cross-reference pinelabs_bug_report.xlsx for the bug details.",
     "",
-    "Environment: run against a site with pinelabs_fin + erpnext; a Pine Labs terminal",
+    "Environment: run against a site with pinelabs_finstein + erpnext; a Pine Labs terminal",
     "simulator or sandbox for Terminal cases, and Plural sandbox creds for Payment Link cases.",
 ]
 for n in notes:

@@ -28,7 +28,7 @@ import frappe
 import requests
 from frappe import _
 
-from pinelabs_fin.api.redact import redact
+from pinelabs_finstein.api.redact import redact
 
 # Canonical Plural API hosts. Single source of truth — also referenced by
 # pinelabs_settings.PinelabsSettings._resolve_plural_base_url to surface the
@@ -189,7 +189,7 @@ class PluralClient:
 
 	def _get_base_url(self) -> str:
 		"""Resolved base URL, refused unless safe to send credentials to."""
-		from pinelabs_fin.api.url_guard import assert_gateway_url
+		from pinelabs_finstein.api.url_guard import assert_gateway_url
 
 		url = self._resolve_base_url()
 		assert_gateway_url(url, _("Plural API Base URL"))

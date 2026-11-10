@@ -104,7 +104,7 @@ test.describe('Payment Link guards', () => {
     await openForm(page, `sales-invoice/${F.inv_nocontact}`);
     // PineLabs - Payment Link has no account mapped on this site, so the
     // account pre-flight fires before any gateway call.
-    const r = await callExpectingError(page, 'pinelabs_fin.api.plural.initiate_payment_link', {
+    const r = await callExpectingError(page, 'pinelabs_finstein.api.plural.initiate_payment_link', {
       reference_doctype: 'Sales Invoice',
       reference_name: F.inv_nocontact,
     });
@@ -117,7 +117,7 @@ test.describe('Payment Link guards', () => {
     // Map the account so the pre-flight passes and the CONTACT guard is reached.
     await setPaymentLinkAccount(page, 'Cash - PLM');
     try {
-      const r = await callExpectingError(page, 'pinelabs_fin.api.plural.initiate_payment_link', {
+      const r = await callExpectingError(page, 'pinelabs_finstein.api.plural.initiate_payment_link', {
         reference_doctype: 'Sales Invoice',
         reference_name: F.inv_nocontact,
       });
@@ -135,7 +135,7 @@ test.describe('Amount guard', () => {
     await openForm(page, `sales-invoice/${F.inv_paid}`);   // fully paid -> outstanding 0
     // BUG-17 FIXED: a submitted invoice with outstanding 0 no longer falls back
     // to grand_total, so initiate refuses instead of charging it again.
-    const r = await callExpectingError(page, 'pinelabs_fin.api.terminal.initiate_terminal_payment', {
+    const r = await callExpectingError(page, 'pinelabs_finstein.api.terminal.initiate_terminal_payment', {
       reference_doctype: 'Sales Invoice',
       reference_name: F.inv_paid,
       mode_of_payment: 'PineLabs - Card',

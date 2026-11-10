@@ -94,7 +94,7 @@ def handle_webhook():
 			_finalize_event(event_row, status="failed")
 			return _respond(404, f"No Pinelabs Transaction matches {order_id}")
 
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
 
 		txn = frappe.get_doc("Pinelabs Transaction", txn_name)
 		if txn.status == "SUCCESS":

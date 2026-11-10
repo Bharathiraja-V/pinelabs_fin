@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-`pinelabs_fin` is a **Frappe/ERPNext v16 custom app** (branch `version-16`) that adds Pine Labs payments to any ERPNext document: tap a card on a physical terminal ("Pay on Machine") or send a Plural hosted checkout link ("Send Payment Link"), with the ERPNext Payment Entry created automatically on success.
+`pinelabs_finstein` is a **Frappe/ERPNext v16 custom app** (branch `version-16`) that adds Pine Labs payments to any ERPNext document: tap a card on a physical terminal ("Pay on Machine") or send a Plural hosted checkout link ("Send Payment Link"), with the ERPNext Payment Entry created automatically on success.
 
 The app is a directory inside a bench, not a standalone project. Almost every command runs from the **bench root**, not from this app directory:
 
 - Bench root: `/home/finstein-emp/bench-pinelab`
-- This app: `<bench>/apps/pinelabs_fin`
+- This app: `<bench>/apps/pinelabs_finstein`
 - Sites: `pinelab.local`, `pine.local`
 - Sibling apps: `frappe`, `erpnext`, `fin_pos` (`fin_pos` is a **consumer** of this app's terminal API — see the shim note in `api/terminal.py:203`)
 
@@ -20,9 +20,9 @@ All `bench` commands run from the bench root.
 ```bash
 # Tests (Frappe test runner; site must allow tests once)
 bench --site pinelab.local set-config allow_tests true
-bench --site pinelab.local run-tests --app pinelabs_fin                        # whole app
-bench --site pinelab.local run-tests --module pinelabs_fin.api.test_phase1     # one module
-bench --site pinelab.local run-tests --module pinelabs_fin.api.test_phase1 \
+bench --site pinelab.local run-tests --app pinelabs_finstein                        # whole app
+bench --site pinelab.local run-tests --module pinelabs_finstein.api.test_phase1     # one module
+bench --site pinelab.local run-tests --module pinelabs_finstein.api.test_phase1 \
       --test test_pending_on_response_code_zero                                # one test
 
 # Apply changes
@@ -129,7 +129,7 @@ Everything lives on the `Pinelabs Settings` **Single** doctype: `machines` (term
 
 ## Landmines
 
-**The whole live surface is small — five modules.** `api/` contains exactly: `transaction.py` (state machine), `terminal.py`, `plural.py`, `webhook.py`, plus the two HTTP clients and `conflict_guard.py` / `config.py` / `customer_contact.py`. A legacy parallel layer (`pos_endpoints.py`, `host_adapter.py`, `payment_bridge.py`, `services.py`, `webhooks.py`, `public/js/pinelabs_payment.js`, `public/js/form_button_injector.js`, the `pinelabs_test_terminal` page) was **deleted** in PRs #10/#11 (commits `fed2bcf`, `e40e3d1`). If you find code or docs referencing `pinelabs_fin.api.pos_endpoints.*`, `Pinelabs Transaction Log`, `Pinelabs Payment Mode`, or `Pinelabs Test Order`, it is stale — those no longer exist. The empty `pinelabs_payment_mode/` and `pinelabs_test_order/` directories linger only as leftover `__pycache__`.
+**The whole live surface is small — five modules.** `api/` contains exactly: `transaction.py` (state machine), `terminal.py`, `plural.py`, `webhook.py`, plus the two HTTP clients and `conflict_guard.py` / `config.py` / `customer_contact.py`. A legacy parallel layer (`pos_endpoints.py`, `host_adapter.py`, `payment_bridge.py`, `services.py`, `webhooks.py`, `public/js/pinelabs_payment.js`, `public/js/form_button_injector.js`, the `pinelabs_test_terminal` page) was **deleted** in PRs #10/#11 (commits `fed2bcf`, `e40e3d1`). If you find code or docs referencing `pinelabs_finstein.api.pos_endpoints.*`, `Pinelabs Transaction Log`, `Pinelabs Payment Mode`, or `Pinelabs Test Order`, it is stale — those no longer exist. The empty `pinelabs_payment_mode/` and `pinelabs_test_order/` directories linger only as leftover `__pycache__`.
 
 **Documentation is inconsistent and lags the code.** `README.md` is accurate and current. `guide.md` is a detailed reference that is **partially stale** — it describes 4 Modes of Payment carrying custom fields (there are 3, with none), plus doctypes and patches (`pinelabs_bank`, `seed_pinelabs_banks.py`, …) that don't exist. `GUIDE.md` (capitalized — a *different* file on this case-sensitive filesystem) documents the **deleted** `pos_endpoints` API end to end and should be treated as obsolete. Trust the code and `README.md` over both.
 
@@ -152,4 +152,4 @@ INR only. Refunds are not initiated by the app. `Pinelabs Transaction` is named 
 
 ## Tests
 
-`bench --site <site> run-tests --app pinelabs_fin`. `test_phase1.py` builds invoices from `_fixture()` (ERPNext's `_Test …` records if present, else the site's own Company / Customer / sales Item) and snapshots/restores the relevant Pinelabs Settings in `setUpModule` / `tearDownModule`, because `mark_success` commits and a rollback can't undo it. Still: run it on a dev/test site, never production — it leaves invoices and Payment Entries behind.
+`bench --site <site> run-tests --app pinelabs_finstein`. `test_phase1.py` builds invoices from `_fixture()` (ERPNext's `_Test …` records if present, else the site's own Company / Customer / sales Item) and snapshots/restores the relevant Pinelabs Settings in `setUpModule` / `tearDownModule`, because `mark_success` commits and a rollback can't undo it. Still: run it on a dev/test site, never production — it leaves invoices and Payment Entries behind.

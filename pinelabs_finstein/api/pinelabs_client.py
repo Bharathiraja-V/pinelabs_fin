@@ -30,7 +30,7 @@ import requests
 from frappe import _
 from frappe.utils import cint, now_datetime
 
-from pinelabs_fin.api.redact import redact
+from pinelabs_finstein.api.redact import redact
 
 
 class PineLabsClient:
@@ -125,7 +125,7 @@ class PineLabsClient:
 
 		# Credentials go to this URL on every call — refuse anything that is not
 		# https with certificate checks (loopback / developer_mode excepted).
-		from pinelabs_fin.api.url_guard import assert_gateway_url
+		from pinelabs_finstein.api.url_guard import assert_gateway_url
 
 		assert_gateway_url(self.base_url, _("Pine Labs API URL"), verify_ssl=self.verify_ssl)
 
@@ -163,7 +163,7 @@ class PineLabsClient:
 		# Auto-cancel: per-machine override > Pinelabs Settings > default.
 		# Shared with terminal._auto_cancel_minutes so the gateway timer and
 		# the app-side age-out can never disagree — see resolve_auto_cancel_minutes.
-		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+		from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 			resolve_auto_cancel_minutes,
 		)
 
@@ -414,7 +414,7 @@ class PineLabsClient:
 
 	# ─────────────────────────────────────────────────────────────────────
 	# Lean pure-HTTP methods used by terminal.py. All transaction state
-	# writes go through pinelabs_fin.api.transaction.
+	# writes go through pinelabs_finstein.api.transaction.
 	# ─────────────────────────────────────────────────────────────────────
 
 	def upload_billed_raw(self, transaction_ref, amount, allowed_payment_mode):
@@ -492,7 +492,7 @@ class PineLabsClient:
 
 	# ─────────────────────────────────────────────────────────────────────
 	# Plural API plumbing — moved to ``api/plural_client.py``.
-	# Use ``from pinelabs_fin.api.plural_client import get_plural_client``.
+	# Use ``from pinelabs_finstein.api.plural_client import get_plural_client``.
 	# ─────────────────────────────────────────────────────────────────────
 
 

@@ -1,4 +1,4 @@
-app_name = "pinelabs_fin"
+app_name = "pinelabs_finstein"
 app_title = "Pinelabs Fin"
 app_publisher = "Finstein"
 app_description = "Pine Labs payments for ERPNext: terminal taps and hosted payment links, with auto Payment Entry on success."
@@ -13,11 +13,11 @@ required_apps = ["erpnext"]
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
 # 	{
-# 		"name": "pinelabs_fin",
-# 		"logo": "/assets/pinelabs_fin/logo.png",
+# 		"name": "pinelabs_finstein",
+# 		"logo": "/assets/pinelabs_finstein/logo.png",
 # 		"title": "Pinelabs Fin",
-# 		"route": "/pinelabs_fin",
-# 		"has_permission": "pinelabs_fin.api.permission.has_app_permission"
+# 		"route": "/pinelabs_finstein",
+# 		"has_permission": "pinelabs_finstein.api.permission.has_app_permission"
 # 	}
 # ]
 
@@ -25,15 +25,15 @@ required_apps = ["erpnext"]
 # ------------------
 
 # include js, css files in header of desk.html
-# app_include_css = "/assets/pinelabs_fin/css/pinelabs_fin.css"
-app_include_js = ["/assets/pinelabs_fin/js/pinelabs_buttons.js"]
+# app_include_css = "/assets/pinelabs_finstein/css/pinelabs_finstein.css"
+app_include_js = ["/assets/pinelabs_finstein/js/pinelabs_buttons.js"]
 
 # include js, css files in header of web template
-# web_include_css = "/assets/pinelabs_fin/css/pinelabs_fin.css"
-# web_include_js = "/assets/pinelabs_fin/js/pinelabs_fin.js"
+# web_include_css = "/assets/pinelabs_finstein/css/pinelabs_finstein.css"
+# web_include_js = "/assets/pinelabs_finstein/js/pinelabs_finstein.js"
 
 # include custom scss in every website theme (without file extension ".scss")
-# website_theme_scss = "pinelabs_fin/public/scss/website"
+# website_theme_scss = "pinelabs_finstein/public/scss/website"
 
 # include js, css files in header of web form
 # webform_include_js = {"doctype": "public/js/doctype.js"}
@@ -51,7 +51,7 @@ app_include_js = ["/assets/pinelabs_fin/js/pinelabs_buttons.js"]
 # Svg Icons
 # ------------------
 # include app icons in desk
-# app_include_icons = "pinelabs_fin/public/icons.svg"
+# app_include_icons = "pinelabs_finstein/public/icons.svg"
 
 # Home Pages
 # ----------
@@ -75,43 +75,43 @@ app_include_js = ["/assets/pinelabs_fin/js/pinelabs_buttons.js"]
 
 # add methods and filters to jinja environment
 # jinja = {
-# 	"methods": "pinelabs_fin.utils.jinja_methods",
-# 	"filters": "pinelabs_fin.utils.jinja_filters"
+# 	"methods": "pinelabs_finstein.utils.jinja_methods",
+# 	"filters": "pinelabs_finstein.utils.jinja_filters"
 # }
 
 # Installation
 # ------------
 
-# before_install = "pinelabs_fin.install.before_install"
-after_install = "pinelabs_fin.install.after_install"
+# before_install = "pinelabs_finstein.install.before_install"
+after_install = "pinelabs_finstein.install.after_install"
 
 # Uninstallation
 # ------------
 
-# before_uninstall = "pinelabs_fin.uninstall.before_uninstall"
-# after_uninstall = "pinelabs_fin.uninstall.after_uninstall"
+# before_uninstall = "pinelabs_finstein.uninstall.before_uninstall"
+# after_uninstall = "pinelabs_finstein.uninstall.after_uninstall"
 
 # Integration Setup
 # ------------------
 # To set up dependencies/integrations with other apps
 # Name of the app being installed is passed as an argument
 
-# before_app_install = "pinelabs_fin.utils.before_app_install"
-# after_app_install = "pinelabs_fin.utils.after_app_install"
+# before_app_install = "pinelabs_finstein.utils.before_app_install"
+# after_app_install = "pinelabs_finstein.utils.after_app_install"
 
 # Integration Cleanup
 # -------------------
 # To clean up dependencies/integrations with other apps
 # Name of the app being uninstalled is passed as an argument
 
-# before_app_uninstall = "pinelabs_fin.utils.before_app_uninstall"
-# after_app_uninstall = "pinelabs_fin.utils.after_app_uninstall"
+# before_app_uninstall = "pinelabs_finstein.utils.before_app_uninstall"
+# after_app_uninstall = "pinelabs_finstein.utils.after_app_uninstall"
 
 # Desk Notifications
 # ------------------
 # See frappe.core.notifications.get_notification_config
 
-# notification_config = "pinelabs_fin.notifications.get_notification_config"
+# notification_config = "pinelabs_finstein.notifications.get_notification_config"
 
 # Permissions
 # -----------
@@ -144,7 +144,7 @@ after_install = "pinelabs_fin.install.after_install"
 # flags.pinelabs_internal_pe.
 doc_events = {
 	"Payment Entry": {
-		"validate": "pinelabs_fin.api.conflict_guard.refuse_if_pinelabs_active",
+		"validate": "pinelabs_finstein.api.conflict_guard.refuse_if_pinelabs_active",
 	},
 }
 
@@ -159,8 +159,8 @@ scheduler_events = {
 		# - Plural: catches missed webhooks (no public URL, dropped
 		#   delivery, secret mismatch, …) so doc finalizes without manual click.
 		"* * * * *": [
-			"pinelabs_fin.api.terminal.reconcile_pending_terminal_payments",
-			"pinelabs_fin.api.plural.reconcile_pending_plural_payments",
+			"pinelabs_finstein.api.terminal.reconcile_pending_terminal_payments",
+			"pinelabs_finstein.api.plural.reconcile_pending_plural_payments",
 		],
 	},
 }
@@ -168,20 +168,20 @@ scheduler_events = {
 # Testing
 # -------
 
-# before_tests = "pinelabs_fin.install.before_tests"
+# before_tests = "pinelabs_finstein.install.before_tests"
 
 # Overriding Methods
 # ------------------------------
 #
 # override_whitelisted_methods = {
-# 	"frappe.desk.doctype.event.event.get_events": "pinelabs_fin.event.get_events"
+# 	"frappe.desk.doctype.event.event.get_events": "pinelabs_finstein.event.get_events"
 # }
 #
 # each overriding function accepts a `data` argument;
 # generated from the base implementation of the doctype dashboard,
 # along with any modifications made in other Frappe apps
 # override_doctype_dashboards = {
-# 	"Task": "pinelabs_fin.task.get_dashboard_data"
+# 	"Task": "pinelabs_finstein.task.get_dashboard_data"
 # }
 
 # exempt linked doctypes from being automatically cancelled
@@ -195,13 +195,13 @@ scheduler_events = {
 
 # Request Events
 # ----------------
-# before_request = ["pinelabs_fin.utils.before_request"]
-# after_request = ["pinelabs_fin.utils.after_request"]
+# before_request = ["pinelabs_finstein.utils.before_request"]
+# after_request = ["pinelabs_finstein.utils.after_request"]
 
 # Job Events
 # ----------
-# before_job = ["pinelabs_fin.utils.before_job"]
-# after_job = ["pinelabs_fin.utils.after_job"]
+# before_job = ["pinelabs_finstein.utils.before_job"]
+# after_job = ["pinelabs_finstein.utils.after_job"]
 
 # User Data Protection
 # --------------------
@@ -231,7 +231,7 @@ scheduler_events = {
 # --------------------------------
 
 # auth_hooks = [
-# 	"pinelabs_fin.auth.validate"
+# 	"pinelabs_finstein.auth.validate"
 # ]
 
 # Automatically update python controller files with type annotations for this app.

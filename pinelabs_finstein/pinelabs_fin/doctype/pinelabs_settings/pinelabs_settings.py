@@ -99,7 +99,7 @@ class PinelabsSettings(Document):
 
 	def _validate_gateway_urls(self):
 		"""Refuse gateway URLs that would expose credentials (see url_guard)."""
-		from pinelabs_fin.api.url_guard import assert_gateway_url
+		from pinelabs_finstein.api.url_guard import assert_gateway_url
 
 		if cint(self.enable_payment_links) and (self.plural_base_url or "").strip():
 			assert_gateway_url(self.plural_base_url, _("Plural API Base URL"))
@@ -121,7 +121,7 @@ class PinelabsSettings(Document):
 		"""
 		if not cint(self.enable_payment_links):
 			return
-		from pinelabs_fin.api.plural_client import PLURAL_SANDBOX_URL
+		from pinelabs_finstein.api.plural_client import PLURAL_SANDBOX_URL
 
 		typed = (self.plural_base_url or "").strip()
 		if typed:

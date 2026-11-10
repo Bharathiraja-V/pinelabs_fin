@@ -81,7 +81,7 @@ def assert_doctype_payable(reference_doctype, flow):
 	Both ``is_enabled`` and the per-flow toggle must be on. A doctype with no
 	row is refused — configuration is the allow-list.
 	"""
-	from pinelabs_fin.api import transaction as txn_service
+	from pinelabs_finstein.api import transaction as txn_service
 
 	config = txn_service._get_payable_config(reference_doctype)
 	if not config:

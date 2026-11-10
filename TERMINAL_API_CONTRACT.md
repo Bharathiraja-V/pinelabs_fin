@@ -1,7 +1,7 @@
 # Pine Labs Terminal API — Request & Response Contract
 
 Complete I/O reference for the three whitelisted terminal endpoints in
-[pinelabs_fin/api/terminal.py](pinelabs_fin/api/terminal.py). For every endpoint, in order:
+[pinelabs_finstein/api/terminal.py](pinelabs_finstein/api/terminal.py). For every endpoint, in order:
 
 1. **Caller → this app** — the request the API caller sends in
 2. **This app → Pine Labs machine** — the payload this app posts to the Pine Labs Cloud API
@@ -27,13 +27,13 @@ Complete I/O reference for the three whitelisted terminal endpoints in
 > - Many Plutus terminal firmwares accept `11` and present the customer-friendly scan-QR flow regardless — which is why `11` "just works" in practice.
 > - Strict spec-compliant terminals will instead present a Bharat QR screen for `11`. If you see UPI flows behaving oddly (wrong screen, merchant-not-recognised, freeze waiting for settlement), this is the cause and the fix is to send `10` for UPI Sale.
 >
-> The constant is in [`PINELABS_TERMINAL_MODES`](pinelabs_fin/api/transaction.py#L55).
+> The constant is in [`PINELABS_TERMINAL_MODES`](pinelabs_finstein/api/transaction.py#L55).
 
 ---
 
 ## Endpoint 1 — `initiate_terminal_payment`
 
-Method: `pinelabs_fin.api.terminal.initiate_terminal_payment`
+Method: `pinelabs_finstein.api.terminal.initiate_terminal_payment`
 Whitelisted: yes.
 
 ### 1.1 Caller → this app
@@ -51,7 +51,7 @@ initiate_terminal_payment(
 REST equivalent:
 
 ```http
-POST /api/method/pinelabs_fin.api.terminal.initiate_terminal_payment
+POST /api/method/pinelabs_finstein.api.terminal.initiate_terminal_payment
 Content-Type: application/json
 
 {
@@ -121,7 +121,7 @@ this app sees `{"success": false, "error": "Request timeout - ...", "status_code
 
 ### 1.4 This app → caller
 
-Every return goes through [`_shape()`](pinelabs_fin/api/terminal.py#L416) → 5-key envelope:
+Every return goes through [`_shape()`](pinelabs_finstein/api/terminal.py#L416) → 5-key envelope:
 
 ```json
 {
@@ -147,7 +147,7 @@ Every return goes through [`_shape()`](pinelabs_fin/api/terminal.py#L416) → 5-
 
 ## Endpoint 2 — `check_terminal_status`
 
-Method: `pinelabs_fin.api.terminal.check_terminal_status`
+Method: `pinelabs_finstein.api.terminal.check_terminal_status`
 Whitelisted: yes.
 
 ### 2.1 Caller → this app
@@ -162,7 +162,7 @@ check_terminal_status(
 REST equivalent:
 
 ```http
-POST /api/method/pinelabs_fin.api.terminal.check_terminal_status
+POST /api/method/pinelabs_finstein.api.terminal.check_terminal_status
 Content-Type: application/json
 
 {
@@ -211,7 +211,7 @@ Body:
 }
 ```
 
-After parsing, [`_parse_transaction_data_array`](pinelabs_fin/api/pinelabs_client.py#L203) flattens the array onto the response dict so `response_data.RRN`, `response_data.ApprovalCode`, etc. are also top-level keys.
+After parsing, [`_parse_transaction_data_array`](pinelabs_finstein/api/pinelabs_client.py#L203) flattens the array onto the response dict so `response_data.RRN`, `response_data.ApprovalCode`, etc. are also top-level keys.
 
 #### Still waiting
 
@@ -257,15 +257,15 @@ Smaller envelope than initiate (no `transaction_name` — caller passed it in):
 | **Age-out, no race** (Gap 1+2) | `true` | `"FAILED"` | (last code seen, e.g. 1001) | `"Aged out"` |
 | Unknown code (within cutoff) | `true` | `txn.status` (stays `"PENDING"`) | the unknown code | Pine Labs `ResponseMessage` OR underlying error (e.g. `"Request timeout - ..."`) OR `"Unknown response code"` |
 
-The age-out path is implemented in [`_attempt_age_out_settlement`](pinelabs_fin/api/terminal.py#L429): it sends a cancel to Pine Labs first (to stop further taps), then polls one last time. If that final poll returns `0`, the txn is marked SUCCESS; otherwise FAILED with `"Aged out"`.
+The age-out path is implemented in [`_attempt_age_out_settlement`](pinelabs_finstein/api/terminal.py#L429): it sends a cancel to Pine Labs first (to stop further taps), then polls one last time. If that final poll returns `0`, the txn is marked SUCCESS; otherwise FAILED with `"Aged out"`.
 
-**Force Cancel fallback (v1.36+).** If the regular cancel call returns a non-zero `ResponseCode` (e.g. terminal frozen, already processed), the helper additionally invokes [`force_cancel_raw`](pinelabs_fin/api/pinelabs_client.py#L440). This hits a separate Pine Labs Cloud endpoint configured via `Pinelabs API Endpoint.force_cancel_transaction_endpoint` (default `/API/CloudBasedIntegration/V1/ForceCancelTransaction`). Leave the field blank on the active endpoint row to disable the fallback. Same request shape as the regular cancel.
+**Force Cancel fallback (v1.36+).** If the regular cancel call returns a non-zero `ResponseCode` (e.g. terminal frozen, already processed), the helper additionally invokes [`force_cancel_raw`](pinelabs_finstein/api/pinelabs_client.py#L440). This hits a separate Pine Labs Cloud endpoint configured via `Pinelabs API Endpoint.force_cancel_transaction_endpoint` (default `/API/CloudBasedIntegration/V1/ForceCancelTransaction`). Leave the field blank on the active endpoint row to disable the fallback. Same request shape as the regular cancel.
 
 ---
 
 ## Endpoint 3 — `cancel_terminal_payment`
 
-Method: `pinelabs_fin.api.terminal.cancel_terminal_payment`
+Method: `pinelabs_finstein.api.terminal.cancel_terminal_payment`
 Whitelisted: yes.
 
 ### 3.1 Caller → this app
@@ -280,7 +280,7 @@ cancel_terminal_payment(
 REST equivalent:
 
 ```http
-POST /api/method/pinelabs_fin.api.terminal.cancel_terminal_payment
+POST /api/method/pinelabs_finstein.api.terminal.cancel_terminal_payment
 Content-Type: application/json
 
 {
@@ -365,7 +365,7 @@ What every code means in each context:
 
 ## Reference — `TransactionData` tags this app understands
 
-[`_parse_transaction_data_array`](pinelabs_fin/api/pinelabs_client.py#L222) flattens these from the array onto the response dict:
+[`_parse_transaction_data_array`](pinelabs_finstein/api/pinelabs_client.py#L222) flattens these from the array onto the response dict:
 
 | Pine Labs `Tag` | Flattened key | Notes |
 |---|---|---|
@@ -422,7 +422,7 @@ When integrating with this app (custom button, wrapper API, external system):
 
   ```python
   def initiate_my_terminal_payment(...):
-      result = pinelabs_fin.api.terminal.initiate_terminal_payment(...)
+      result = pinelabs_finstein.api.terminal.initiate_terminal_payment(...)
       if isinstance(result, dict):
           result["_pinelabs_external_poll"] = True
       return result

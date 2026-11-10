@@ -29,7 +29,7 @@ If you are building a custom page or a custom POS screen, you can trigger the te
 ### A. Initiate Payment
 Use this API to send the payment request to the Pine Labs terminal.
 
-**Endpoint:** `pinelabs_fin.api.pos_endpoints.initiate_payment`
+**Endpoint:** `pinelabs_finstein.api.pos_endpoints.initiate_payment`
 
 **Request Parameters:**
 | Parameter | Type | Required | Description |
@@ -57,7 +57,7 @@ Use this API to send the payment request to the Pine Labs terminal.
 ### B. Check Payment Status
 After initiating, you must poll this API every 3-5 seconds to check if the user has completed the payment.
 
-**Endpoint:** `pinelabs_fin.api.pos_endpoints.check_payment_status`
+**Endpoint:** `pinelabs_finstein.api.pos_endpoints.check_payment_status`
 
 **Request Parameters:**
 | Parameter | Type | Required | Description |
@@ -83,7 +83,7 @@ Here is how to combine these APIs in your custom JavaScript:
 function makePayment(docname, amount) {
     // 1. Trigger the terminal
     frappe.call({
-        method: "pinelabs_fin.api.pos_endpoints.initiate_payment",
+        method: "pinelabs_finstein.api.pos_endpoints.initiate_payment",
         args: {
             invoice_name: docname,
             amount: amount,
@@ -104,7 +104,7 @@ function makePayment(docname, amount) {
 function startPolling(ref) {
     let interval = setInterval(() => {
         frappe.call({
-            method: "pinelabs_fin.api.pos_endpoints.check_payment_status",
+            method: "pinelabs_finstein.api.pos_endpoints.check_payment_status",
             args: { transaction_reference: ref },
             callback: function(res) {
                 if (res.message.status === "Approved") {

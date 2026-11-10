@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Backend + API test suite for pinelabs_fin (the non-UI test cases).
+"""Backend + API test suite for pinelabs_finstein (the non-UI test cases).
 
 Covers the manual cases in pinelabs_test_cases.xlsx that cannot be driven from
 the browser: state-machine internals, Payment Entry finalization, conflict guard,
@@ -30,7 +30,7 @@ SITE = "pine.local"
 SITES_PATH = "/home/finstein-emp/bench-pinelab/sites"
 BASE = "http://127.0.0.1:8015"
 COMPANY = "Pine Lab Machine"
-WEBHOOK_URL = f"{BASE}/api/method/pinelabs_fin.api.webhook.handle_webhook"
+WEBHOOK_URL = f"{BASE}/api/method/pinelabs_finstein.api.webhook.handle_webhook"
 
 
 # ── shared helpers ───────────────────────────────────────────────────────
@@ -71,7 +71,7 @@ def cleanup_invoice(name):
 # ══════════════════════════════════════════════════════════════════════════
 class TestStateMachine(unittest.TestCase):
     def setUp(self):
-        from pinelabs_fin.api import transaction as ts
+        from pinelabs_finstein.api import transaction as ts
         self.inv = make_invoice()
         self.txn = ts.mark_pending(
             ts.create_transaction(reference_doctype="Sales Invoice", reference_name=self.inv.name,
@@ -132,7 +132,7 @@ class TestPaymentEntry(unittest.TestCase):
         frappe.db.commit()
 
     def _pending(self, payment_id):
-        from pinelabs_fin.api import transaction as ts
+        from pinelabs_finstein.api import transaction as ts
         return ts.mark_pending(
             ts.create_transaction(reference_doctype="Sales Invoice", reference_name=self.inv.name,
                                   flow_type="Terminal", amount=1000, payment_method="CARD",
@@ -140,7 +140,7 @@ class TestPaymentEntry(unittest.TestCase):
             payment_id=payment_id)
 
     def test_TC_PE_01_success_creates_payment_entry(self):
-        from pinelabs_fin.api import transaction as ts
+        from pinelabs_finstein.api import transaction as ts
         txn = self._pending("PLUTUS-PE-1")
         txn = ts.mark_success(txn, payment_id="PLUTUS-PE-1", payment_method="CARD")
         self.assertEqual(txn.status, "SUCCESS")
@@ -151,7 +151,7 @@ class TestPaymentEntry(unittest.TestCase):
         self.assertEqual(pe.docstatus, 1)
 
     def test_TC_PE_02_idempotent_double_success(self):
-        from pinelabs_fin.api import transaction as ts
+        from pinelabs_finstein.api import transaction as ts
         txn = self._pending("PLUTUS-PE-2")
         txn = ts.mark_success(txn, payment_id="PLUTUS-PE-2", payment_method="CARD")
         first_pe = txn.payment_entry
@@ -164,7 +164,7 @@ class TestPaymentEntry(unittest.TestCase):
 # ══════════════════════════════════════════════════════════════════════════
 class TestConflictGuard(unittest.TestCase):
     def setUp(self):
-        from pinelabs_fin.api import transaction as ts
+        from pinelabs_finstein.api import transaction as ts
         self.inv = make_invoice()
         self.txn = ts.mark_pending(
             ts.create_transaction(reference_doctype="Sales Invoice", reference_name=self.inv.name,
@@ -197,12 +197,12 @@ class TestAmount(unittest.TestCase):
     def test_TC_AMT_02_amount_field_ignored_BUG11(self):
         # KNOWN ISSUE BUG-11: _amount_for takes only source_doc, so it cannot
         # consult the configured amount_field.
-        from pinelabs_fin.api import terminal
+        from pinelabs_finstein.api import terminal
         params = list(inspect.signature(terminal._amount_for).parameters)
         self.assertEqual(params, ["source_doc"])
 
     def test_TC_AMT_01_amount_for_uses_outstanding(self):
-        from pinelabs_fin.api import terminal
+        from pinelabs_finstein.api import terminal
         inv = make_invoice()
         try:
             self.assertEqual(terminal._amount_for(inv), 1000.0)
@@ -214,7 +214,7 @@ class TestAmount(unittest.TestCase):
         the caller refuses — not fall back to grand_total and charge it again.
         Drafts must still fall back (outstanding is only computed at submit).
         """
-        from pinelabs_fin.api import terminal
+        from pinelabs_finstein.api import terminal
 
         class Doc:
             def __init__(self, **kw):
@@ -239,7 +239,7 @@ class TestAmount(unittest.TestCase):
 # ══════════════════════════════════════════════════════════════════════════
 class TestRouting(unittest.TestCase):
     def test_TC_ROUTE_01_single_machine_default(self):
-        from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+        from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
             resolve_machine_for_context,
         )
         machine = resolve_machine_for_context("Sales Invoice", None)
@@ -258,7 +258,7 @@ class TestContact(unittest.TestCase):
         frappe.db.rollback()
 
     def test_TC_CC_01_direct_field(self):
-        from pinelabs_fin.api.customer_contact import _resolve_value
+        from pinelabs_finstein.api.customer_contact import _resolve_value
 
         class Row(dict):
             def get(self, k, d=None):
@@ -275,7 +275,7 @@ class TestContact(unittest.TestCase):
     def test_TC_CC_05_dynamic_link_wrong_party_BUG14(self):
         # KNOWN ISSUE BUG-14: linked lookup uses a pinned doctype, ignoring the
         # doc's real Dynamic Link target -> wrong party's contact.
-        from pinelabs_fin.api.customer_contact import _resolve_value
+        from pinelabs_finstein.api.customer_contact import _resolve_value
 
         name = "Acme Traders BT"
         if not frappe.db.exists("Customer", name):
@@ -308,13 +308,13 @@ class TestContact(unittest.TestCase):
 # ══════════════════════════════════════════════════════════════════════════
 class TestWebhookUnit(unittest.TestCase):
     def test_TC_WH_classify_paid_failed_unknown(self):
-        from pinelabs_fin.api.webhook import _classify
+        from pinelabs_finstein.api.webhook import _classify
         self.assertEqual(_classify({"status": "PROCESSED"}, "ORDER_PROCESSED"), "paid")
         self.assertEqual(_classify({"status": "FAILED"}, "PAYMENT_FAILED"), "failed")
         self.assertEqual(_classify({"status": "???"}, "SOMETHING_ELSE"), "unknown")
 
     def test_TC_WH_extract_method(self):
-        from pinelabs_fin.api.webhook import _extract_method
+        from pinelabs_finstein.api.webhook import _extract_method
         self.assertEqual(_extract_method({"payment_method": "upi"}), "UPI")
         self.assertEqual(_extract_method({"payments": [{"payment_mode": "card"}]}), "CARD")
 
@@ -326,7 +326,7 @@ class TestClientParse(unittest.TestCase):
     def test_TC_TERM_19_malformed_200_is_failure_BUG01(self):
         # BUG-01 FIXED: a 200 with an unreadable (non-JSON) body is now reported
         # as failure, not success.
-        from pinelabs_fin.api.pinelabs_client import PineLabsClient
+        from pinelabs_finstein.api.pinelabs_client import PineLabsClient
         resp = requests.models.Response()
         resp.status_code = 200
         resp._content = b"<html><body>502 upstream busy</body></html>"
@@ -339,7 +339,7 @@ class TestClientParse(unittest.TestCase):
 class TestCancelPayload(unittest.TestCase):
     def test_TC_TERM_cancel_payload_has_store_and_amount_BUG05(self):
         # BUG-05 FIXED: cancel payload now carries the store identifier and Amount.
-        from pinelabs_fin.api.pinelabs_client import PineLabsClient
+        from pinelabs_finstein.api.pinelabs_client import PineLabsClient
         c = object.__new__(PineLabsClient)
         c.merchant_id, c.security_token, c.client_id, c.store_id = "M1", "S1", "C1", "ST1"
         payload = c._cancel_payload(123456789, amount=1000)
@@ -357,7 +357,7 @@ class TestWebhookHTTP(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from pinelabs_fin.api import transaction as ts
+        from pinelabs_finstein.api import transaction as ts
         # Defensive pre-clean: a prior interrupted run may have left EVT-WHB-*
         # event rows (a terminal 'ignored'/'processed' row would dedup this run's
         # re-posts). Start from a clean slate regardless of past teardown.

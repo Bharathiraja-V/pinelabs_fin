@@ -61,8 +61,8 @@ def initiate_payment_link(
 	Returns:
 	  {success, transaction_name, payment_link_url, payment_link_id, message}
 	"""
-	from pinelabs_fin.api import access
-	from pinelabs_fin.api import transaction as txn_service
+	from pinelabs_finstein.api import access
+	from pinelabs_finstein.api import transaction as txn_service
 
 	print(f"[PineLabs PayByLink] Initiate: reference_doctype={reference_doctype} reference_name={reference_name} flow={flow} expiry_minutes={expiry_minutes}")
 	frappe.logger("pinelabs_paybylink", file_count=5).info(f"[PineLabs PayByLink] Initiate: reference_doctype={reference_doctype} reference_name={reference_name} flow={flow} expiry_minutes={expiry_minutes}")
@@ -104,10 +104,16 @@ def initiate_payment_link(
 	if customer_email:
 		customer["email_id"] = (customer_email or "").strip()
 	if customer_mobile:
-		customer["mobile_number"] = (customer_mobile or "").strip()
+		# Same normalisation the resolver applies to a mobile read from the
+		# document: digits only, last 10 (drops +91 / 0 prefixes). A value that
+		# is not a 10-digit mobile would produce a link nobody receives.
+		digits = "".join(c for c in str(customer_mobile) if c.isdigit())[-10:]
+		if len(digits) != 10:
+			frappe.throw(_("Enter a valid 10-digit mobile number."))
+		customer["mobile_number"] = digits
 
 	if not (customer.get("email_id") or customer.get("mobile_number")):
-		from pinelabs_fin.api.customer_contact import describe_resolution
+		from pinelabs_finstein.api.customer_contact import describe_resolution
 
 		trace = describe_resolution(source_doc)
 		frappe.throw(
@@ -155,9 +161,9 @@ def initiate_payment_link(
 @frappe.whitelist(methods=["POST"])
 def refresh_payment_link_status(transaction_name: str) -> dict:
 	"""Manual status refresh for admin troubleshooting (webhooks are primary)."""
-	from pinelabs_fin.api import access
-	from pinelabs_fin.api import transaction as txn_service
-	from pinelabs_fin.api.plural_client import get_plural_client
+	from pinelabs_finstein.api import access
+	from pinelabs_finstein.api import transaction as txn_service
+	from pinelabs_finstein.api.plural_client import get_plural_client
 
 	txn = access.load_transaction_for_user(transaction_name)
 	# Same bar as taking the payment. The cron reconciler runs as
@@ -250,8 +256,8 @@ def reconcile_pending_plural_payments() -> None:
 
 
 def _initiate_payment_link(*, source_doc, amount, customer, flow, expiry_minutes, create_payment_entry=None):
-	from pinelabs_fin.api import transaction as txn_service
-	from pinelabs_fin.api.plural_client import get_plural_client
+	from pinelabs_finstein.api import transaction as txn_service
+	from pinelabs_finstein.api.plural_client import get_plural_client
 
 	allowed_methods = _FLOW_TO_METHODS.get(flow)  # None for all_methods
 
@@ -366,7 +372,7 @@ def _get_customer_details(doc):
 	# Payable Doctypes → Customer Contact Field Mapping. Empty-string returns
 	# from the resolver mean "not configured / not found", so we still fall
 	# through to the auto-detect chain below.
-	from pinelabs_fin.api.customer_contact import resolve_from_config
+	from pinelabs_finstein.api.customer_contact import resolve_from_config
 
 	configured = resolve_from_config(doc)
 	mobile = configured.get("mobile") or None
@@ -440,7 +446,7 @@ def _load_eligible_source(reference_doctype, reference_name):
 	# Existence + permission first, with one shared error for both, so a caller
 	# without access cannot learn whether a document exists (or is cancelled /
 	# submitted) from the message.
-	from pinelabs_fin.api import access
+	from pinelabs_finstein.api import access
 
 	access.assert_can_pay(reference_doctype, reference_name)
 	doc = frappe.get_doc(reference_doctype, reference_name)
@@ -457,7 +463,7 @@ def _amount_for(source_doc):
 	``rounded_total`` fallback that the Terminal flow already had and this one
 	was missing.
 	"""
-	from pinelabs_fin.api import transaction as txn_service
+	from pinelabs_finstein.api import transaction as txn_service
 
 	return txn_service.resolve_payment_amount(source_doc)
 

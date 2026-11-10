@@ -69,10 +69,10 @@ def initiate_terminal_payment(
 	  Pinelabs Transaction and the source doc is left untouched
 	- omitted / ``None`` → use the row's setting (current behaviour)
 	"""
-	from pinelabs_fin.api import access
-	from pinelabs_fin.api import transaction as txn_service
-	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
-	from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+	from pinelabs_finstein.api import access
+	from pinelabs_finstein.api import transaction as txn_service
+	from pinelabs_finstein.api.pinelabs_client import get_pinelabs_client
+	from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 		resolve_machine_for_context,
 	)
 
@@ -291,9 +291,9 @@ def check_terminal_status(transaction_name: str, create_payment_entry: int | Non
 	Pinelabs Transaction so the finalize path uses it. Omit to leave the
 	stored value (or the Payable Documents config) untouched.
 	"""
-	from pinelabs_fin.api import access
-	from pinelabs_fin.api import transaction as txn_service
-	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
+	from pinelabs_finstein.api import access
+	from pinelabs_finstein.api import transaction as txn_service
+	from pinelabs_finstein.api.pinelabs_client import get_pinelabs_client
 
 	txn = access.load_transaction_for_user(transaction_name)
 	# Whoever may take the payment may watch it. Without this, any logged-in
@@ -431,8 +431,8 @@ def retry_failed_terminal_payment(transaction_name: str) -> dict:
 
 	Returns the same 5-key envelope as initiate_terminal_payment.
 	"""
-	from pinelabs_fin.api import access
-	from pinelabs_fin.api.transaction import PINELABS_METHOD_TO_MODE
+	from pinelabs_finstein.api import access
+	from pinelabs_finstein.api.transaction import PINELABS_METHOD_TO_MODE
 
 	txn = access.load_transaction_for_user(transaction_name)
 	# Retry starts a REAL new charge, so gate it here as well as inside
@@ -471,9 +471,9 @@ def retry_failed_terminal_payment(transaction_name: str) -> dict:
 @frappe.whitelist(methods=["POST"])
 def cancel_terminal_payment(transaction_name: str, reason: str | None = None) -> dict:
 	"""User-driven cancel of an in-flight terminal transaction."""
-	from pinelabs_fin.api import access
-	from pinelabs_fin.api import transaction as txn_service
-	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
+	from pinelabs_finstein.api import access
+	from pinelabs_finstein.api import transaction as txn_service
+	from pinelabs_finstein.api.pinelabs_client import get_pinelabs_client
 
 	txn = access.load_transaction_for_user(transaction_name)
 	# Cancelling is destructive to a live payment — same bar as taking it.
@@ -632,8 +632,8 @@ def _attempt_age_out_settlement(txn, last_response_code, last_response_data, las
 	Best-effort: cancel / final-poll failures don't block the FAILED
 	transition (we still need a terminal state).
 	"""
-	from pinelabs_fin.api import transaction as txn_service
-	from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
+	from pinelabs_finstein.api import transaction as txn_service
+	from pinelabs_finstein.api.pinelabs_client import get_pinelabs_client
 
 	if txn.payment_id:
 		# Stop the terminal from accepting further taps. If the regular
@@ -709,7 +709,7 @@ def _load_eligible_source(reference_doctype, reference_name):
 	# Existence + permission first, with one shared error for both, so a caller
 	# without access cannot learn whether a document exists (or is cancelled /
 	# submitted) from the message.
-	from pinelabs_fin.api import access
+	from pinelabs_finstein.api import access
 
 	access.assert_can_pay(reference_doctype, reference_name)
 	doc = frappe.get_doc(reference_doctype, reference_name)
@@ -734,7 +734,7 @@ def _amount_for(source_doc):
 	the settled-document guard that stops a fully-paid invoice being charged
 	again.
 	"""
-	from pinelabs_fin.api import transaction as txn_service
+	from pinelabs_finstein.api import transaction as txn_service
 
 	return txn_service.resolve_payment_amount(source_doc)
 
@@ -751,7 +751,7 @@ def _load_pinelabs_mode(mode_of_payment, expected_flows):
 	flow-type check; this function only ever runs against the Terminal
 	dialog, so the only valid input is ``("Terminal", "Both")``.
 	"""
-	from pinelabs_fin.api.transaction import PINELABS_TERMINAL_MODES
+	from pinelabs_finstein.api.transaction import PINELABS_TERMINAL_MODES
 
 	if not mode_of_payment:
 		frappe.throw(_("Mode of Payment is required."))
@@ -810,7 +810,7 @@ def _auto_cancel_minutes(txn) -> int:
 	Labs uses in its own documentation examples — made the app fire
 	``cancel`` + ``force_cancel`` mid-transaction.
 	"""
-	from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+	from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 		resolve_auto_cancel_minutes,
 	)
 

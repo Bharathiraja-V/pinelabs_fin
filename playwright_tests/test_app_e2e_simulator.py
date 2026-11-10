@@ -1,5 +1,4 @@
-# -*- coding: utf-8 -*-
-"""End-to-end test of pinelabs_fin against the live Pine Labs simulator (:5000).
+"""End-to-end test of pinelabs_finstein against the live Pine Labs simulator (:5000).
 
 Unlike test_phase1.py (gateway mocked) this calls the app's real whitelisted
 functions - initiate / check / cancel / retry / refresh - on pine.local, and the
@@ -93,11 +92,12 @@ def pes_for(inv):
 
 
 def poll_until_final(txn_name, fn, timeout=15):
-	from pinelabs_fin.api import terminal
+	from pinelabs_finstein.api import terminal
 
 	deadline = time.time() + timeout
 	while time.time() < deadline:
-		res = getattr(terminal, fn)(txn_name) if fn != "link" else None
+		if fn != "link":
+			getattr(terminal, fn)(txn_name)
 		frappe.db.commit()
 		if txn(txn_name).status in ("SUCCESS", "FAILED", "CANCELLED"):
 			return txn(txn_name).status
@@ -148,7 +148,7 @@ def ensure_link_mode_account():
 		return
 	card = frappe.get_doc("Mode of Payment", CARD)
 	acct = next(a.default_account for a in card.accounts if a.company == COMPANY)
-	row = mop.append("accounts", {"company": COMPANY, "default_account": acct})
+	mop.append("accounts", {"company": COMPANY, "default_account": acct})
 	mop.save(ignore_permissions=True)
 	frappe.db.commit()
 	_temp_link_account.append(mop.accounts[-1].name)
@@ -188,7 +188,7 @@ class AppCase(unittest.TestCase):
 		sim("POST", "/api/config", {"outcome_mode": "manual", "manual_outcome": "success", "webhook_enabled": False})
 
 	def initiate(self, inv, mode=CARD, **kw):
-		from pinelabs_fin.api import terminal
+		from pinelabs_finstein.api import terminal
 
 		res = terminal.initiate_terminal_payment("Sales Invoice", inv, mode, **kw)
 		frappe.db.commit()
@@ -243,7 +243,7 @@ class TestTerminalFlow(AppCase):
 		self.assertEqual(flt(invoice(inv).outstanding_amount), 1000)
 
 	def test_user_cancel_while_pending(self):
-		from pinelabs_fin.api import terminal
+		from pinelabs_finstein.api import terminal
 
 		inv = make_invoice()
 		res = self.initiate(inv)
@@ -261,7 +261,7 @@ class TestTerminalFlow(AppCase):
 		self.assertEqual(pes_for(inv), [])
 
 	def test_retry_after_decline_creates_a_new_working_transaction(self):
-		from pinelabs_fin.api import terminal
+		from pinelabs_finstein.api import terminal
 
 		inv = make_invoice()
 		first = self.initiate(inv)
@@ -277,7 +277,7 @@ class TestTerminalFlow(AppCase):
 		self.assertEqual(txn(first["transaction_name"]).status, "FAILED")  # history preserved
 
 	def test_polling_after_success_never_creates_a_second_payment_entry(self):
-		from pinelabs_fin.api import terminal
+		from pinelabs_finstein.api import terminal
 
 		inv = make_invoice()
 		res = self.initiate(inv)
@@ -304,11 +304,11 @@ class TestTerminalFlow(AppCase):
 				frappe.init(site=SITE, sites_path=SITES_PATH)
 				frappe.connect()
 				frappe.set_user("Administrator")
-				from pinelabs_fin.api import terminal
+				from pinelabs_finstein.api import terminal
 
 				terminal.poll_terminal_status(res["transaction_name"])
 				frappe.db.commit()
-			except Exception as e:  # noqa: BLE001
+			except Exception as e:
 				errors.append(repr(e))
 			finally:
 				frappe.destroy()
@@ -400,14 +400,14 @@ class TestPreflightGuards(AppCase):
 		self._assert_refused_without_gateway_call(lambda: self.initiate(inv, LINK))
 
 	def test_unknown_document_refused(self):
-		from pinelabs_fin.api import terminal
+		from pinelabs_finstein.api import terminal
 
 		self._assert_refused_without_gateway_call(
 			lambda: terminal.initiate_terminal_payment("Sales Invoice", "ACC-SINV-DOES-NOT-EXIST", CARD)
 		)
 
 	def test_non_payable_doctype_refused(self):
-		from pinelabs_fin.api import terminal
+		from pinelabs_finstein.api import terminal
 
 		self._assert_refused_without_gateway_call(
 			lambda: terminal.initiate_terminal_payment("Customer", CUSTOMER, CARD)
@@ -425,7 +425,7 @@ class TestPreflightGuards(AppCase):
 				# if accepted it must not charge a nonsensical amount
 				self.assertGreater(flt(txn(res["transaction_name"]).amount), 0)
 				sim("POST", "/api/reset")
-				from pinelabs_fin.api import terminal
+				from pinelabs_finstein.api import terminal
 
 				terminal.cancel_terminal_payment(res["transaction_name"])
 				frappe.db.commit()
@@ -469,17 +469,17 @@ class TestPreflightGuards(AppCase):
 class TestGatewayMisbehaviour(AppCase):
 	def test_gateway_down_does_not_leave_an_active_transaction(self):
 		inv = make_invoice()
-		with patch("pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw", side_effect=ConnectionError("down")):
+		with patch("pinelabs_finstein.api.pinelabs_client.PineLabsClient.upload_billed_raw", side_effect=ConnectionError("down")):
 			try:
 				self.initiate(inv)
-			except Exception:  # noqa: BLE001
+			except Exception:
 				frappe.db.rollback()
 		active = frappe.get_all("Pinelabs Transaction", filters={"reference_name": inv, "status": ["in", ["INITIATED", "PENDING"]]})
 		self.assertEqual(active, [], "a failed upload left the invoice locked by an active transaction")
 		self.assertEqual(pes_for(inv), [])
 
 	def test_unknown_ptrn_from_gateway_never_succeeds(self):
-		from pinelabs_fin.api import terminal
+		from pinelabs_finstein.api import terminal
 
 		inv = make_invoice()
 		res = self.initiate(inv)
@@ -499,11 +499,11 @@ def _sim_plural():
 	@contextmanager
 	def _ctx():
 		with ExitStack() as st:
-			st.enter_context(patch("pinelabs_fin.api.plural_client.PluralClient._get_base_url", return_value=SIM))
+			st.enter_context(patch("pinelabs_finstein.api.plural_client.PluralClient._get_base_url", return_value=SIM))
 			# The site has no saved Plural credentials; give the client the simulator's demo pair, in memory only.
 			st.enter_context(
 				patch(
-					"pinelabs_fin.api.plural_client.PluralClient._get_credentials",
+					"pinelabs_finstein.api.plural_client.PluralClient._get_credentials",
 					return_value=("SIM_CLIENT_ID_DEMO", "SIM_CLIENT_SECRET_DEMO"),
 				)
 			)
@@ -519,7 +519,7 @@ class TestPaymentLinkPreflight(AppCase):
 
 	def test_link_refused_before_plural_is_called_when_mode_has_no_account(self):
 		"""Fail-fast guard: no default account for the company -> refuse BEFORE a customer could be sent a link."""
-		from pinelabs_fin.api import plural
+		from pinelabs_finstein.api import plural
 
 		if any(a.company == COMPANY for a in frappe.get_doc("Mode of Payment", LINK).accounts):
 			self.skipTest("Payment Link mode already has an account on this site")
@@ -538,7 +538,7 @@ class TestPaymentLinkFlow(AppCase):
 		ensure_link_mode_account()
 
 	def _initiate(self, inv, **kw):
-		from pinelabs_fin.api import plural
+		from pinelabs_finstein.api import plural
 
 		with _sim_plural():
 			res = plural.initiate_payment_link("Sales Invoice", inv, **kw)
@@ -546,7 +546,7 @@ class TestPaymentLinkFlow(AppCase):
 		return res
 
 	def _refresh(self, name):
-		from pinelabs_fin.api import plural
+		from pinelabs_finstein.api import plural
 
 		with _sim_plural():
 			out = plural.refresh_payment_link_status(name)
@@ -557,7 +557,7 @@ class TestPaymentLinkFlow(AppCase):
 		return txn(name).order_id
 
 	def _customer_has_contact(self):
-		from pinelabs_fin.api import plural
+		from pinelabs_finstein.api import plural
 
 		return plural
 
@@ -600,7 +600,6 @@ class TestPaymentLinkFlow(AppCase):
 		inv = make_invoice(customer="No Contact Customer") if frappe.db.exists("Customer", "No Contact Customer") else None
 		if not inv:
 			self.skipTest("fixture customer 'No Contact Customer' not present")
-		before = len(sim("GET", "/api/transactions") if isinstance(sim("GET", "/api/transactions"), list) else [])
 		with self.assertRaises(frappe.ValidationError):
 			self._initiate(inv)
 		frappe.db.rollback()
@@ -627,7 +626,7 @@ class TestPaymentLinkFlow(AppCase):
 					self._initiate(inv, customer_mobile=mobile, customer_email="e2e@example.com")
 				except frappe.ValidationError:
 					frappe.db.rollback()
-				except Exception as e:  # noqa: BLE001
+				except Exception as e:
 					self.fail(f"unhandled {type(e).__name__} for mobile={mobile!r}: {e}")
 
 

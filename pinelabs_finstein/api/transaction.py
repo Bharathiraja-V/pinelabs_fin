@@ -646,16 +646,32 @@ def _create_payment_entry_idempotent(transaction):
 	# Restrict to non-cancelled PEs (docstatus 0 or 1) so a previously
 	# cancelled PE pointing at the same Pine Labs payment doesn't block
 	# a legitimate retry.
-	existing = frappe.db.get_value(
-		"Payment Entry",
+	# Scoped to this source document: a gateway reference number that happens
+	# to repeat (or a PE for another invoice that shares it) must never be
+	# adopted, or this invoice would be marked paid by someone else's entry.
+	existing = frappe.db.sql(
+		"""
+		select pe.name from `tabPayment Entry` pe
+		where pe.reference_no = %(ref_no)s and pe.docstatus < 2
+			and (
+				pe.remarks like %(remark)s
+				or exists (
+					select 1 from `tabPayment Entry Reference` ref
+					where ref.parent = pe.name
+						and ref.reference_doctype = %(dt)s and ref.reference_name = %(dn)s
+				)
+			)
+		limit 1
+		""",
 		{
-			"reference_no": transaction.payment_id,
-			"docstatus": ["<", 2],
+			"ref_no": transaction.payment_id,
+			"remark": f"%Pinelabs Transaction: {transaction.name}.%",
+			"dt": transaction.reference_doctype,
+			"dn": transaction.reference_name,
 		},
-		"name",
 	)
 	if existing:
-		return existing
+		return existing[0][0]
 
 	# Rule 4: standard ERPNext PE builder.
 	from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
@@ -1102,7 +1118,7 @@ def _to_json_str(value):
 	payload), so redacting at this single point keeps credentials out of the
 	row, its Version history, exports and backups.
 	"""
-	from pinelabs_fin.api.redact import redact
+	from pinelabs_finstein.api.redact import redact
 
 	if isinstance(value, str):
 		stripped = value.lstrip()

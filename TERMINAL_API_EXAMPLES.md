@@ -20,7 +20,7 @@ All values are realistic placeholders — replace `MerchantID`, `SecurityToken`,
 **Caller → app**
 
 ```http
-POST /api/method/pinelabs_fin.api.terminal.initiate_terminal_payment
+POST /api/method/pinelabs_finstein.api.terminal.initiate_terminal_payment
 Content-Type: application/json
 ```
 
@@ -258,7 +258,7 @@ Content-Type: application/json
 **Caller → app**
 
 ```http
-POST /api/method/pinelabs_fin.api.terminal.check_terminal_status
+POST /api/method/pinelabs_finstein.api.terminal.check_terminal_status
 Content-Type: application/json
 ```
 
@@ -620,7 +620,7 @@ Content-Type: application/json
 **Caller → app**
 
 ```http
-POST /api/method/pinelabs_fin.api.terminal.cancel_terminal_payment
+POST /api/method/pinelabs_finstein.api.terminal.cancel_terminal_payment
 Content-Type: application/json
 ```
 

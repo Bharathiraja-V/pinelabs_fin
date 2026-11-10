@@ -17,7 +17,7 @@ frappe.init(site="pine.local", sites_path=".")
 frappe.connect()
 frappe.set_user("Administrator")
 
-from pinelabs_fin.api import transaction as txn_service  # noqa: E402
+from pinelabs_finstein.api import transaction as txn_service  # noqa: E402
 
 COMPANY = "Pine Lab Machine"
 

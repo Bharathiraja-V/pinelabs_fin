@@ -161,11 +161,11 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 		// The server resolves the parent Singleton's child rows — fetching
 		// the child table with `frappe.db.get_list` silently drops
 		// Link/custom fields (returns rows with only `name`).
-		// pinelabs_fin.api.access.get_payable_doctypes returns only the
+		// pinelabs_finstein.api.access.get_payable_doctypes returns only the
 		// per-doctype switches. Reading the Settings doctype directly is
 		// System Manager–only, so cashiers got a 403 and no buttons.
 		frappe.call({
-			method: "pinelabs_fin.api.access.get_payable_doctypes",
+			method: "pinelabs_finstein.api.access.get_payable_doctypes",
 		})
 			.then((r) => {
 				const rows = (r && r.message && r.message.payable_doctypes) || [];
@@ -270,7 +270,7 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 					get_query() {
 						// Pine Labs Terminal modes are identified by name — no
 						// custom fields required. Keep this list in sync with
-						// PINELABS_TERMINAL_MODES in pinelabs_fin/api/transaction.py.
+						// PINELABS_TERMINAL_MODES in pinelabs_finstein/api/transaction.py.
 						return {
 							filters: {
 								enabled: 1,
@@ -297,7 +297,7 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 
 	function start_terminal_payment(frm, mode_of_payment) {
 		frappe.call({
-			method: "pinelabs_fin.api.terminal.initiate_terminal_payment",
+			method: "pinelabs_finstein.api.terminal.initiate_terminal_payment",
 			args: {
 				reference_doctype: frm.doctype,
 				reference_name: frm.docname,
@@ -525,7 +525,7 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 			retry_payment.__inflight = true;
 			modal.hide();
 			frappe.call({
-				method: "pinelabs_fin.api.terminal.retry_failed_terminal_payment",
+				method: "pinelabs_finstein.api.terminal.retry_failed_terminal_payment",
 				args: { transaction_name },
 				freeze: true,
 				freeze_message: __("Restarting terminal payment..."),
@@ -591,7 +591,7 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 				// own poller isn't tracking THIS txn — e.g. after our Retry
 				// button creates a new txn the consumer's PaymentModal does
 				// not know about.
-				method: "pinelabs_fin.api.terminal.poll_terminal_status",
+				method: "pinelabs_finstein.api.terminal.poll_terminal_status",
 				args: { transaction_name },
 				callback(r) {
 					const round_trip = Math.round(performance.now() - tick_start);
@@ -638,7 +638,7 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 
 	function cancel_terminal_payment(transaction_name, on_done) {
 		frappe.call({
-			method: "pinelabs_fin.api.terminal.cancel_terminal_payment",
+			method: "pinelabs_finstein.api.terminal.cancel_terminal_payment",
 			args: { transaction_name, reason: "user cancelled from modal" },
 			freeze: true,
 			freeze_message: __("Cancelling..."),
@@ -664,7 +664,7 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 		const on_error = options.on_error || ((msg) => show_error(__("Terminal payment failed"), msg));
 
 		return frappe.call({
-			method: "pinelabs_fin.api.terminal.initiate_terminal_payment",
+			method: "pinelabs_finstein.api.terminal.initiate_terminal_payment",
 			args: args,
 			freeze: true,
 			freeze_message: __("Sending request to terminal..."),
@@ -728,7 +728,7 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 		const show_popup = options.show_popup !== false;
 
 		return frappe.call({
-			method: "pinelabs_fin.api.plural.initiate_payment_link",
+			method: "pinelabs_finstein.api.plural.initiate_payment_link",
 			args: args,
 			freeze: true,
 			freeze_message: __("Generating payment link..."),
@@ -782,7 +782,7 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 	// that already open it in their callback don't get a duplicate.
 	// ─────────────────────────────────────────────────────────────────
 	const PLT_TXN_RE = /^PLT-/i;
-	const INITIATE_METHOD = "pinelabs_fin.api.terminal.initiate_terminal_payment";
+	const INITIATE_METHOD = "pinelabs_finstein.api.terminal.initiate_terminal_payment";
 
 	if (frappe.call && !frappe.call.__pinelabs_wrapped) {
 		const __original_frappe_call = frappe.call;
@@ -804,8 +804,13 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 				// re-open the modal — and once the modal has finalized,
 				// each subsequent poll opens a NEW one, flashing a
 				// "Waiting for terminal..." spinner over a terminated txn.
-				const is_initiate_method = /\binitiate(_|\.)/i.test(method_name)
-					|| /\.initiate_terminal_payment\b/i.test(method_name);
+				// Payment links (Plural) are NOT terminal payments: they have
+				// no terminal to wait on, and polling the terminal API for a
+				// Plural txn errors ("not a Terminal transaction").
+				const is_link_method = /payment_link|\.plural\./i.test(method_name);
+				const is_initiate_method = !is_link_method
+					&& (/\binitiate(_|\.)/i.test(method_name)
+						|| /\.initiate_terminal_payment\b/i.test(method_name));
 				opts.callback = function (r) {
 					// Run caller's callback first so any options it passes to
 					// open_terminal_modal (on_settled, on_cancel) win — our
@@ -822,7 +827,12 @@ frappe.pinelabs.register_dialog_extension = function (ext) {
 					// flag. Catches direct + wrapped APIs in one rule.
 					const msg = (r && r.message) || {};
 					const txn_name = msg.transaction_name || msg.transaction_reference;
-					if (msg.success && typeof txn_name === "string" && PLT_TXN_RE.test(txn_name)) {
+					if (
+						msg.success
+						&& !msg.payment_link_url
+						&& typeof txn_name === "string"
+						&& PLT_TXN_RE.test(txn_name)
+					) {
 						// Wrapper APIs that run their own poll loop set
 						// `_pinelabs_external_poll: true` on the response —
 						// the modal then skips its internal setInterval and

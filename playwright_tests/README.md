@@ -19,7 +19,7 @@ Drives the Frappe Desk like a user. Covers the UI-possible subset of
 ## v16 end-to-end run (`test_app_e2e_simulator.py`)
 
 Constants at the top (`SITE`, `SITES_PATH`, `COMPANY`, `CUSTOMER`, `ITEM`, accounts) match the `pine.local` v16 bench.
-Run from `<bench>/sites`: `../env/bin/python ../apps/pinelabs_fin/playwright_tests/test_app_e2e_simulator.py`.
+Run from `<bench>/sites`: `../env/bin/python ../apps/pinelabs_finstein/playwright_tests/test_app_e2e_simulator.py`.
 
 Result on v16: 33 run, 33 pass. The payment-link cases tick `Enable Payment Links` for the run and restore it,
 and give the Plural client the simulator's demo credentials in memory only (nothing saved to Settings).

@@ -35,7 +35,7 @@ function run_plural_connection_test(frm) {
 		return;
 	}
 	frappe.call({
-		method: "pinelabs_fin.api.config.test_plural_connection",
+		method: "pinelabs_finstein.api.config.test_plural_connection",
 		freeze: true,
 		freeze_message: __("Contacting Plural..."),
 		callback(r) {
@@ -180,7 +180,7 @@ frappe.ui.form.on("Pinelabs Payable Doctype", {
 function populate_source_options(frm, cdn, doctype) {
 	if (!doctype) return;
 	frappe.call({
-		method: "pinelabs_fin.api.customer_contact.list_doctype_fields",
+		method: "pinelabs_finstein.api.customer_contact.list_doctype_fields",
 		args: { doctype },
 		callback(r) {
 			const data = r.message || {};
@@ -207,7 +207,7 @@ function autofill_linked_doctype(frm, cdt, cdn, kind) {
 		return;
 	}
 	frappe.call({
-		method: "pinelabs_fin.api.customer_contact.get_link_field_target",
+		method: "pinelabs_finstein.api.customer_contact.get_link_field_target",
 		args: { doctype: row.doctype_name, fieldname: link_field },
 		callback(r) {
 			const target = r.message || "";
@@ -229,7 +229,7 @@ function populate_linked_field_options(frm, cdt, cdn, kind) {
 	const linked_dt = row[`${kind}_linked_doctype`];
 	if (!linked_dt) return;
 	frappe.call({
-		method: "pinelabs_fin.api.customer_contact.list_doctype_fields",
+		method: "pinelabs_finstein.api.customer_contact.list_doctype_fields",
 		args: { doctype: linked_dt },
 		callback(r) {
 			const data = r.message || {};

@@ -9,7 +9,7 @@
 //   3. Retry → fetches txn details, re-initiates, new modal opens for new txn.
 //
 // Run via:
-//   bench --site <site> run-ui-tests pinelabs_fin
+//   bench --site <site> run-ui-tests pinelabs_finstein
 
 context("Pinelabs Terminal Dialog — Failure UX", () => {
 	const FAKE_TXN = "PLT-CYTEST-FAILURE";
@@ -28,7 +28,7 @@ context("Pinelabs Terminal Dialog — Failure UX", () => {
 		// we put these before any window().then() that opens the modal.
 		cy.intercept(
 			"POST",
-			"/api/method/pinelabs_fin.api.terminal.check_terminal_status",
+			"/api/method/pinelabs_finstein.api.terminal.check_terminal_status",
 			{
 				statusCode: 200,
 				body: {
@@ -132,7 +132,7 @@ context("Pinelabs Terminal Dialog — Failure UX", () => {
 		const RETRY_TXN = "PLT-CYTEST-RETRY";
 		cy.intercept(
 			"POST",
-			"/api/method/pinelabs_fin.api.terminal.initiate_terminal_payment",
+			"/api/method/pinelabs_finstein.api.terminal.initiate_terminal_payment",
 			{
 				statusCode: 200,
 				body: {
@@ -188,7 +188,7 @@ context("Pinelabs Terminal Dialog — Failure UX", () => {
 		// initiate must NOT be called.
 		cy.intercept(
 			"POST",
-			"/api/method/pinelabs_fin.api.terminal.initiate_terminal_payment",
+			"/api/method/pinelabs_finstein.api.terminal.initiate_terminal_payment",
 			cy.spy().as("initiateSpy"),
 		);
 

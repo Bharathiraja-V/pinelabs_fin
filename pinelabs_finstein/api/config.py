@@ -24,7 +24,7 @@ def test_plural_connection() -> dict:
 	      "expires_in_seconds": int  # only set on success
 	    }
 	"""
-	from pinelabs_fin.api.plural_client import get_plural_client
+	from pinelabs_finstein.api.plural_client import get_plural_client
 
 	# This is a Settings-form button and it probes live gateway credentials.
 	# Without a role gate any logged-in user could use it as an oracle to

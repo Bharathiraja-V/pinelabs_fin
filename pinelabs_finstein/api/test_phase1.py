@@ -4,7 +4,7 @@
 """Phase 1 happy-path + state-machine tests.
 
 Run with:
-  bench --site <site> run-tests --app pinelabs_fin --module pinelabs_fin.api.test_phase1
+  bench --site <site> run-tests --app pinelabs_finstein --module pinelabs_finstein.api.test_phase1
 """
 
 import hashlib
@@ -68,7 +68,7 @@ class TestTransactionStateMachine(unittest.TestCase):
 		# rollback unwinds the invoice along with everything else — running
 		# the invoice creation once at class-level leaves later tests staring
 		# at a LinkValidationError when they reference a long-rolled-back row.
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
 		self._invoice = _make_test_invoice()
 		self.txn = txn_service.create_transaction(
 			reference_doctype="Sales Invoice",
@@ -100,7 +100,7 @@ class TestTransactionStateMachine(unittest.TestCase):
 		self.assertEqual(self.txn.status, "INITIATED")
 
 	def test_pending_to_initiated_is_rejected(self):
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
 		txn_service.mark_pending(self.txn, order_id="ORD-1")
 		self.txn = frappe.get_doc("Pinelabs Transaction", self.txn.name)
 		self.txn.status = "INITIATED"
@@ -125,7 +125,7 @@ class TestPaymentEntryGuards(unittest.TestCase):
 		frappe.db.rollback()
 
 	def _make_txn_in_pending(self):
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
 		txn = txn_service.create_transaction(
 			reference_doctype="Sales Invoice",
 			reference_name=self._invoice.name,
@@ -136,20 +136,22 @@ class TestPaymentEntryGuards(unittest.TestCase):
 		return txn_service.mark_pending(txn, order_id="ORD-PE-TEST")
 
 	def test_idempotent_double_mark_success(self):
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
+		# Unique per run: mark_success commits, so a fixed reference would collect one PE per run.
+		ref_no = f"PAY-DEDUPE-{frappe.generate_hash(length=8)}"
 		txn = self._make_txn_in_pending()
-		txn1 = txn_service.mark_success(txn, payment_id="PAY-DEDUPE-1", payment_method="UPI")
-		txn2 = txn_service.mark_success(txn1, payment_id="PAY-DEDUPE-1", payment_method="UPI")
+		txn1 = txn_service.mark_success(txn, payment_id=ref_no, payment_method="UPI")
+		txn2 = txn_service.mark_success(txn1, payment_id=ref_no, payment_method="UPI")
 		self.assertEqual(txn1.payment_entry, txn2.payment_entry)
 		# Exactly one PE was created.
-		count = frappe.db.count("Payment Entry", {"reference_no": "PAY-DEDUPE-1"})
+		count = frappe.db.count("Payment Entry", {"reference_no": ref_no})
 		self.assertEqual(count, 1)
 
 	def test_existing_pe_with_same_reference_no_is_reused(self):
 		"""Rule 2: pre-existing PE with same reference_no → no duplicate."""
 		from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
 
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
 
 		# Per-run unique reference_no so this test is isolated from prior
 		# runs. ``mark_success`` commits internally, so a hardcoded value
@@ -174,6 +176,32 @@ class TestPaymentEntryGuards(unittest.TestCase):
 		self.assertEqual(txn.payment_entry, pe.name)
 		count = frappe.db.count("Payment Entry", {"reference_no": ref_no})
 		self.assertEqual(count, 1)
+
+	def test_pe_of_another_invoice_with_same_reference_no_is_not_adopted(self):
+		"""A repeated gateway reference must not mark this invoice paid via someone else's PE."""
+		from erpnext.accounts.doctype.payment_entry.payment_entry import get_payment_entry
+
+		from pinelabs_finstein.api import transaction as txn_service
+
+		ref_no = f"PAY-COLLIDE-{frappe.generate_hash(length=8)}"
+		other = _make_test_invoice()
+		other_pe = get_payment_entry("Sales Invoice", other.name)
+		other_pe.mode_of_payment = "PineLabs - UPI"
+		other_pe.reference_no = ref_no
+		other_pe.reference_date = frappe.utils.nowdate()
+		other_pe.flags.ignore_permissions = True
+		other_pe.insert()
+		other_pe.submit()
+
+		txn = self._make_txn_in_pending()
+		txn = txn_service.mark_success(txn, payment_id=ref_no, payment_method="UPI")
+
+		self.assertTrue(txn.payment_entry)
+		self.assertNotEqual(txn.payment_entry, other_pe.name)
+		refs = frappe.get_all(
+			"Payment Entry Reference", filters={"parent": txn.payment_entry}, pluck="reference_name"
+		)
+		self.assertEqual(refs, [self._invoice.name])
 
 
 class TestWebhookSignature(unittest.TestCase):
@@ -207,7 +235,7 @@ class TestWebhookSignature(unittest.TestCase):
 		frappe.local.request = _Req(body)
 
 	def test_rejects_invalid_signature(self):
-		from pinelabs_fin.api import webhook as webhook_module
+		from pinelabs_finstein.api import webhook as webhook_module
 		body = json.dumps({"event_type": "ORDER_PROCESSED", "data": {"order_id": "x"}})
 		self._request(body, signature="0" * 64)
 		result = webhook_module.handle_webhook()
@@ -215,7 +243,7 @@ class TestWebhookSignature(unittest.TestCase):
 		self.assertIn("signature", (result.get("message") or "").lower())
 
 	def test_accepts_valid_signature(self):
-		from pinelabs_fin.api import webhook as webhook_module
+		from pinelabs_finstein.api import webhook as webhook_module
 		body = json.dumps({"event_type": "ORDER_PROCESSED", "data": {"order_id": "no-such-order"}})
 		sig = hmac.new(b"test-secret-1234567890abcdef", body.encode("utf-8"), hashlib.sha256).hexdigest()
 		self._request(body, signature=sig)
@@ -239,14 +267,14 @@ class TestTerminalInitiate(unittest.TestCase):
 		frappe.db.rollback()
 
 	def test_pending_on_response_code_zero(self):
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		fake = {
 			"success": True,
 			"data": {"ResponseCode": 0, "ResponseMessage": "ok", "PlutusTransactionReferenceID": 12345},
 		}
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.upload_billed_raw",
 			return_value=fake,
 		):
 			result = terminal_module.initiate_terminal_payment(
@@ -261,14 +289,14 @@ class TestTerminalInitiate(unittest.TestCase):
 		self.assertEqual(str(txn.payment_id), "12345")
 
 	def test_failed_on_response_code_two(self):
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		fake = {
 			"success": True,
 			"data": {"ResponseCode": 2, "ResponseMessage": "Declined"},
 		}
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.upload_billed_raw",
 			return_value=fake,
 		):
 			result = terminal_module.initiate_terminal_payment(
@@ -333,7 +361,7 @@ class TestRouting(unittest.TestCase):
 		return settings.machine_mappings[-1]
 
 	def test_single_mode_uses_default(self):
-		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+		from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 			resolve_machine_for_context,
 		)
 
@@ -349,7 +377,7 @@ class TestRouting(unittest.TestCase):
 		self.assertEqual(machine.machine_name, "Routing Default")
 
 	def test_mapping_match_uses_mapped_machine(self):
-		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+		from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 			resolve_machine_for_context,
 		)
 
@@ -364,7 +392,7 @@ class TestRouting(unittest.TestCase):
 		self.assertEqual(machine.machine_name, "Routing Machine A")
 
 	def test_mapping_no_match_falls_back_to_default(self):
-		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+		from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 			resolve_machine_for_context,
 		)
 
@@ -381,7 +409,7 @@ class TestRouting(unittest.TestCase):
 		self.assertEqual(machine.machine_name, "Routing Default")
 
 	def test_multiple_matches_pick_alphabetically_first_machine(self):
-		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+		from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 			resolve_machine_for_context,
 		)
 
@@ -415,9 +443,9 @@ class TestTerminalEdgeCases(unittest.TestCase):
 
 	def _create_pending_txn(self, plutus_ref="999"):
 		"""Drive a txn to PENDING via the normal initiate path (mocked)."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.upload_billed_raw",
 			return_value={
 				"success": True,
 				"data": {
@@ -436,14 +464,14 @@ class TestTerminalEdgeCases(unittest.TestCase):
 
 	def test_gap4_missing_plutus_ref_marks_failed(self):
 		"""Gap 4: ResponseCode 0 without PlutusTransactionReferenceID must hard-fail."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		fake = {
 			"success": True,
 			"data": {"ResponseCode": 0, "ResponseMessage": "OK"},  # no PlutusTransactionReferenceID
 		}
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.upload_billed_raw",
 			return_value=fake,
 		):
 			result = terminal_module.initiate_terminal_payment(
@@ -459,7 +487,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 
 	def test_gap1_2_age_out_catches_paid_race(self):
 		"""Gap 1+2: 1001 past cutoff → settlement detects customer paid → SUCCESS."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="888")
 
@@ -473,13 +501,13 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		]
 
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.get_status_raw",
 			side_effect=status_responses,
 		), patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.cancel_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.cancel_raw",
 			return_value={"success": True, "data": {"ResponseCode": 0, "ResponseMessage": "CANCELLED"}},
 		), patch(
-			"pinelabs_fin.api.terminal._auto_cancel_minutes",
+			"pinelabs_finstein.api.terminal._auto_cancel_minutes",
 			return_value=0,  # any positive age trips the cutoff
 		):
 			result = terminal_module.check_terminal_status(txn.name)
@@ -490,7 +518,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 
 	def test_gap1_2_age_out_no_race_marks_failed(self):
 		"""Gap 1+2: 1001 past cutoff with no race → FAILED with 'Aged out' reason."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="777")
 
@@ -501,13 +529,13 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		]
 
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.get_status_raw",
 			side_effect=status_responses,
 		), patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.cancel_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.cancel_raw",
 			return_value={"success": True, "data": {"ResponseCode": 0, "ResponseMessage": "CANCELLED"}},
 		), patch(
-			"pinelabs_fin.api.terminal._auto_cancel_minutes",
+			"pinelabs_finstein.api.terminal._auto_cancel_minutes",
 			return_value=0,
 		):
 			result = terminal_module.check_terminal_status(txn.name)
@@ -519,17 +547,17 @@ class TestTerminalEdgeCases(unittest.TestCase):
 
 	def test_gap3_cancel_rejected_but_customer_paid_marks_success(self):
 		"""Gap 3: cancel API rejects ('already processed') → verify poll → SUCCESS."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="666")
 
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.cancel_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.cancel_raw",
 			return_value={"success": True, "data": {
 				"ResponseCode": 1, "ResponseMessage": "Transaction already processed",
 			}},
 		), patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.get_status_raw",
 			return_value={"success": True, "data": {
 				"ResponseCode": 0, "ResponseMessage": "APPROVED",
 				"PlutusTransactionReferenceID": "666",
@@ -543,17 +571,17 @@ class TestTerminalEdgeCases(unittest.TestCase):
 
 	def test_gap3_cancel_rejected_and_not_paid_marks_cancelled(self):
 		"""Gap 3 fallback: cancel rejected + status also non-zero → CANCELLED (no payment dropped)."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="555")
 
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.cancel_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.cancel_raw",
 			return_value={"success": True, "data": {
 				"ResponseCode": 1, "ResponseMessage": "Cannot cancel",
 			}},
 		), patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.get_status_raw",
 			return_value={"success": True, "data": {
 				"ResponseCode": 1001, "ResponseMessage": "TXN UPLOADED",
 			}},
@@ -569,11 +597,11 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		the pre-call state. Prior bug: `_shape` read txn.status BEFORE the
 		caller captured the reloaded txn from mark_*, so accepted txns
 		reported "INITIATED" instead of "PENDING"."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		# Accepted by Pine Labs → DB should be PENDING.
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.upload_billed_raw",
 			return_value={
 				"success": True,
 				"data": {
@@ -593,10 +621,10 @@ class TestTerminalEdgeCases(unittest.TestCase):
 
 	def test_response_status_matches_db_after_sync_decline(self):
 		"""Same regression: sync decline → response should say FAILED, not INITIATED."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.upload_billed_raw",
 			return_value={
 				"success": True,
 				"data": {"ResponseCode": 2, "ResponseMessage": "Declined"},
@@ -614,7 +642,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 	def test_draft_source_doc_accepted_and_auto_submitted_on_success(self):
 		"""Drafts (docstatus=0) are now accepted at initiate. On SUCCESS, the
 		source doc is auto-submitted before the Payment Entry is created."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		# Build a fresh DRAFT invoice (no submit) — same shape as _make_test_invoice
 		# but stops at insert().
@@ -640,7 +668,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 
 		# Initiate against the draft — must NOT throw "must be submitted".
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.upload_billed_raw",
 			return_value={
 				"success": True,
 				"data": {
@@ -661,7 +689,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		# Customer pays → poll returns APPROVED → mark_success kicks in.
 		# Auto-submit must promote the draft to docstatus=1 before PE creation.
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.get_status_raw",
 			return_value={
 				"success": True,
 				"data": {
@@ -683,11 +711,11 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		"""ResponseCode 1006 ('NO RESPONSE FROM PLUTUS' — Pine Labs definitive
 		timeout) must mark the txn FAILED immediately, not sit in the
 		unknown-code branch waiting for age-out."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="606")
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.get_status_raw",
 			return_value={
 				"success": True,
 				"data": {
@@ -708,11 +736,11 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		"""ResponseCode 1008 ('TXN VOIDED' — cancelled at terminal UI or
 		via another system call) must transition the txn to CANCELLED so
 		the dialog closes and the source doc reconciles correctly."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="608")
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.get_status_raw",
 			return_value={
 				"success": True,
 				"data": {
@@ -732,11 +760,11 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		"""poll_terminal_status is a thin alias: the dialog's internal poll
 		hits it to bypass consumer-app shims that filter on the original
 		method name. Behaviour must be identical to check_terminal_status."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="811")
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.get_status_raw",
 			return_value={
 				"success": True,
 				"data": {
@@ -758,13 +786,13 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		"""TimestampMismatchError from a concurrent poll must not propagate
 		to the caller — the alias returns the DB-cached state instead so
 		the dialog doesn't surface an error popup to the operator."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="812")
 		# Simulate the inner check_terminal_status raising mid-save (another
 		# poller already committed the transition between our load and save).
 		with patch(
-			"pinelabs_fin.api.terminal.check_terminal_status",
+			"pinelabs_finstein.api.terminal.check_terminal_status",
 			side_effect=frappe.TimestampMismatchError("simulated race"),
 		):
 			result = terminal_module.poll_terminal_status(txn.name)
@@ -778,7 +806,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		from the original txn's reference + payment_method and re-run
 		initiate_terminal_payment — no separate get_value lookup from the
 		browser."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		# Unique plutus_refs per run — see test_retry_failed_terminal_payment_rejects_unknown_method
 		# for the same isolation reasoning.
@@ -788,7 +816,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		original = self._create_pending_txn(plutus_ref=original_ref)
 		# Force it to FAILED so retry has something to recover from.
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.get_status_raw",
 			return_value={
 				"success": True,
 				"data": {"ResponseCode": 1, "ResponseMessage": "Declined"},
@@ -802,7 +830,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		# reference_doctype/reference_name/payment_method from the original
 		# txn and forward to initiate_terminal_payment automatically.
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.upload_billed_raw",
 			return_value={
 				"success": True,
 				"data": {
@@ -826,7 +854,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		"""If the original txn has an unrecognised payment_method (data
 		corruption / external tampering), retry must throw with a clear
 		error rather than silently issuing initiate with garbage."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		# Unique plutus_ref per run — _create_pending_txn → mark_pending →
 		# commits payment_id to the DB. tearDown's rollback can't revert
@@ -851,7 +879,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 	def test_cancelled_source_doc_still_rejected(self):
 		"""Cancelled docs (docstatus=2) are immutable in Frappe — initiate must
 		still refuse with a clear error."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		# Submit, then cancel the test invoice.
 		self._invoice.cancel()
@@ -870,7 +898,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		"""Age-out path: regular cancel returns non-zero → force_cancel_raw must be
 		called as a fallback to stop a frozen terminal before the final-poll
 		settlement decision."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="222")
 
@@ -886,16 +914,16 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		]
 
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.get_status_raw",
 			side_effect=status_responses,
 		), patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.cancel_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.cancel_raw",
 			return_value={"success": True, "data": {"ResponseCode": 1, "ResponseMessage": "Cannot cancel"}},
 		), patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.force_cancel_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.force_cancel_raw",
 			return_value={"success": True, "data": {"ResponseCode": 0, "ResponseMessage": "Force cancelled"}},
 		) as force_cancel_spy, patch(
-			"pinelabs_fin.api.terminal._auto_cancel_minutes",
+			"pinelabs_finstein.api.terminal._auto_cancel_minutes",
 			return_value=0,
 		):
 			result = terminal_module.check_terminal_status(txn.name)
@@ -909,7 +937,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 	def test_force_cancel_not_called_when_regular_cancel_succeeds(self):
 		"""Symmetry test: when cancel_raw returns 0, force_cancel_raw must NOT
 		be called (avoid two redundant network calls on the happy path)."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="111")
 
@@ -919,16 +947,16 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		]
 
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.get_status_raw",
 			side_effect=status_responses,
 		), patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.cancel_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.cancel_raw",
 			return_value={"success": True, "data": {"ResponseCode": 0, "ResponseMessage": "Cancelled"}},
 		), patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.force_cancel_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.force_cancel_raw",
 			return_value={"success": True, "data": {"ResponseCode": 0}},
 		) as force_cancel_spy, patch(
-			"pinelabs_fin.api.terminal._auto_cancel_minutes",
+			"pinelabs_finstein.api.terminal._auto_cancel_minutes",
 			return_value=0,
 		):
 			terminal_module.check_terminal_status(txn.name)
@@ -940,7 +968,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		so UPI reconciliation queries can read them as named keys."""
 		import json as _json
 
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="333")
 
@@ -965,7 +993,7 @@ class TestTerminalEdgeCases(unittest.TestCase):
 		}
 
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.get_status_raw",
 			return_value=approved_response,
 		):
 			result = terminal_module.check_terminal_status(txn.name)
@@ -978,13 +1006,13 @@ class TestTerminalEdgeCases(unittest.TestCase):
 
 	def test_gap5_network_error_message_propagated(self):
 		"""Gap 5: timeout/HTTP error during poll → captured error_message includes the reason."""
-		from pinelabs_fin.api import terminal as terminal_module
+		from pinelabs_finstein.api import terminal as terminal_module
 
 		txn = self._create_pending_txn(plutus_ref="444")
 
 		# `_handle_request_exception` shape: success=False with the error text.
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.get_status_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.get_status_raw",
 			return_value={
 				"success": False,
 				"error": "Request timeout - Pine Labs server did not respond",
@@ -1028,7 +1056,7 @@ class TestPluralMerchantReference(unittest.TestCase):
 		return {"success": False, "error": "gateway boom", "raw": {}}
 
 	def test_payload_uses_txn_ref_and_keeps_invoice_in_description(self):
-		from pinelabs_fin.api.plural import _build_payment_link_payload
+		from pinelabs_finstein.api.plural import _build_payment_link_payload
 
 		body = _build_payment_link_payload(
 			merchant_ref="PLT-2026-00042",
@@ -1042,12 +1070,12 @@ class TestPluralMerchantReference(unittest.TestCase):
 		self.assertEqual(body["description"], "Payment for ACC-SINV-2026-00001")
 
 	def test_two_attempts_same_invoice_get_distinct_references(self):
-		from pinelabs_fin.api import plural
+		from pinelabs_finstein.api import plural
 
 		# First attempt fails at the gateway → txn goes FAILED, so the
 		# active-transaction guard allows a second attempt on the same invoice.
 		with patch(
-			"pinelabs_fin.api.plural_client.PluralClient.create_payment_link",
+			"pinelabs_finstein.api.plural_client.PluralClient.create_payment_link",
 			return_value=self._fake_create(ok=False),
 		):
 			r1 = plural.initiate_payment_link(
@@ -1059,7 +1087,7 @@ class TestPluralMerchantReference(unittest.TestCase):
 		self.assertFalse(r1["success"])
 
 		with patch(
-			"pinelabs_fin.api.plural_client.PluralClient.create_payment_link",
+			"pinelabs_finstein.api.plural_client.PluralClient.create_payment_link",
 			return_value=self._fake_create(ok=True, link_id="PLINK-2"),
 		):
 			r2 = plural.initiate_payment_link(
@@ -1084,10 +1112,10 @@ class TestPluralMerchantReference(unittest.TestCase):
 		self.assertNotEqual(ref2, self._invoice.name)
 
 	def test_status_refresh_queries_by_txn_reference_not_invoice(self):
-		from pinelabs_fin.api import plural
+		from pinelabs_finstein.api import plural
 
 		with patch(
-			"pinelabs_fin.api.plural_client.PluralClient.create_payment_link",
+			"pinelabs_finstein.api.plural_client.PluralClient.create_payment_link",
 			return_value=self._fake_create(ok=True, link_id="PLINK-3"),
 		):
 			r = plural.initiate_payment_link(
@@ -1105,7 +1133,7 @@ class TestPluralMerchantReference(unittest.TestCase):
 			return {"success": True, "status": "PENDING", "data": {"status": "PENDING"}}
 
 		with patch(
-			"pinelabs_fin.api.plural_client.PluralClient.get_payment_link_status",
+			"pinelabs_finstein.api.plural_client.PluralClient.get_payment_link_status",
 			side_effect=fake_status,
 		):
 			plural.refresh_payment_link_status(txn_name)
@@ -1351,7 +1379,7 @@ class TestSettingsGates(unittest.TestCase):
 		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
 
 	def _initiate_terminal(self):
-		from pinelabs_fin.api import terminal
+		from pinelabs_finstein.api import terminal
 
 		return terminal.initiate_terminal_payment(
 			reference_doctype="Sales Invoice",
@@ -1360,7 +1388,7 @@ class TestSettingsGates(unittest.TestCase):
 		)
 
 	def _initiate_plural(self):
-		from pinelabs_fin.api import plural
+		from pinelabs_finstein.api import plural
 
 		return plural.initiate_payment_link(
 			reference_doctype="Sales Invoice",
@@ -1395,7 +1423,7 @@ class TestSettingsGates(unittest.TestCase):
 
 	def test_payment_links_switch_off_does_not_block_terminal(self):
 		"""It's a Plural-only switch — the terminal flow must be unaffected."""
-		from pinelabs_fin.api import access
+		from pinelabs_finstein.api import access
 
 		_set_settings(enabled=1, enable_payment_links=0)
 		# Gate only; the full initiate would need a live terminal.
@@ -1436,7 +1464,7 @@ class TestSettingsGates(unittest.TestCase):
 		"""Configuration is the allow-list: a doctype with NO Payable Documents
 		row cannot start a payment (the old permissive path let any writable
 		doctype arm the terminal)."""
-		from pinelabs_fin.api import access
+		from pinelabs_finstein.api import access
 
 		_set_settings(enabled=1, enable_payment_links=1)
 		# "ToDo" has no Payable Documents row.
@@ -1474,7 +1502,7 @@ class TestAuthorizationGates(unittest.TestCase):
 		return email
 
 	def test_initiate_terminal_refuses_user_without_write_on_source(self):
-		from pinelabs_fin.api import terminal
+		from pinelabs_finstein.api import terminal
 
 		frappe.set_user(self._make_powerless_user())
 		with self.assertRaises(frappe.PermissionError):
@@ -1485,7 +1513,7 @@ class TestAuthorizationGates(unittest.TestCase):
 			)
 
 	def test_initiate_payment_link_refuses_user_without_write_on_source(self):
-		from pinelabs_fin.api import plural
+		from pinelabs_finstein.api import plural
 
 		frappe.set_user(self._make_powerless_user())
 		with self.assertRaises(frappe.PermissionError):
@@ -1498,8 +1526,8 @@ class TestAuthorizationGates(unittest.TestCase):
 
 	def test_txn_scoped_endpoint_refuses_foreign_user(self):
 		"""IDOR: reading someone else's transaction by guessing its PLT- name."""
-		from pinelabs_fin.api import terminal
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import terminal
+		from pinelabs_finstein.api import transaction as txn_service
 
 		txn = txn_service.create_transaction(
 			reference_doctype="Sales Invoice",
@@ -1514,7 +1542,7 @@ class TestAuthorizationGates(unittest.TestCase):
 
 	def test_administrator_bypasses_the_gate(self):
 		"""The cron reconciler runs as Administrator and must keep working."""
-		from pinelabs_fin.api import access
+		from pinelabs_finstein.api import access
 
 		frappe.set_user("Administrator")
 		access.assert_can_pay("Sales Invoice", self.invoice.name)
@@ -1533,7 +1561,7 @@ class TestConfiguredAmountField(unittest.TestCase):
 		frappe.clear_document_cache("Pinelabs Settings", "Pinelabs Settings")
 
 	def test_configured_field_wins_over_grand_total(self):
-		from pinelabs_fin.api.transaction import resolve_payment_amount
+		from pinelabs_finstein.api.transaction import resolve_payment_amount
 
 		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="custom_part_payment")
 		doc = _StubDoc(
@@ -1543,7 +1571,7 @@ class TestConfiguredAmountField(unittest.TestCase):
 		self.assertEqual(resolve_payment_amount(doc), 250.0)
 
 	def test_falls_back_when_configured_field_is_empty(self):
-		from pinelabs_fin.api.transaction import resolve_payment_amount
+		from pinelabs_finstein.api.transaction import resolve_payment_amount
 
 		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="custom_part_payment")
 		doc = _StubDoc(
@@ -1554,7 +1582,7 @@ class TestConfiguredAmountField(unittest.TestCase):
 
 	def test_settled_invoice_still_refused_even_with_configured_field(self):
 		"""The configured field must not resurrect a fully-paid document."""
-		from pinelabs_fin.api.transaction import resolve_payment_amount
+		from pinelabs_finstein.api.transaction import resolve_payment_amount
 
 		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="custom_part_payment")
 		doc = _StubDoc(
@@ -1564,7 +1592,7 @@ class TestConfiguredAmountField(unittest.TestCase):
 		self.assertEqual(resolve_payment_amount(doc), 0.0)
 
 	def test_submitted_outstanding_is_authoritative_without_config(self):
-		from pinelabs_fin.api.transaction import resolve_payment_amount
+		from pinelabs_finstein.api.transaction import resolve_payment_amount
 
 		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="outstanding_amount")
 		doc = _StubDoc(
@@ -1574,7 +1602,7 @@ class TestConfiguredAmountField(unittest.TestCase):
 		self.assertEqual(resolve_payment_amount(doc), 400.0)
 
 	def test_draft_falls_back_to_rounded_total(self):
-		from pinelabs_fin.api.transaction import resolve_payment_amount
+		from pinelabs_finstein.api.transaction import resolve_payment_amount
 
 		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="outstanding_amount")
 		doc = _StubDoc(
@@ -1585,7 +1613,7 @@ class TestConfiguredAmountField(unittest.TestCase):
 
 	def test_both_flows_share_one_resolver(self):
 		"""plural._amount_for used to be a separate, drifted copy."""
-		from pinelabs_fin.api import plural, terminal
+		from pinelabs_finstein.api import plural, terminal
 
 		_set_payable_row("Sales Invoice", is_enabled=1, amount_field="custom_part_payment")
 		doc = _StubDoc(
@@ -1641,7 +1669,7 @@ class TestTransactionReferenceField(unittest.TestCase):
 		frappe.db.commit()  # nosemgrep: frappe-manual-commit
 
 	def _make_pending_txn(self, create_payment_entry=None):
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
 
 		txn = txn_service.create_transaction(
 			reference_doctype="Sales Invoice",
@@ -1658,7 +1686,7 @@ class TestTransactionReferenceField(unittest.TestCase):
 
 	def test_reference_written_on_payment_entry_path(self):
 		"""The regression: PE ticked used to skip the reference write entirely."""
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
 
 		_set_payable_row(
 			"Sales Invoice", is_enabled=1,
@@ -1673,7 +1701,7 @@ class TestTransactionReferenceField(unittest.TestCase):
 		self.assertEqual(self._ref_value(), txn.name)
 
 	def test_reference_written_on_no_payment_entry_path(self):
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
 
 		_set_payable_row(
 			"Sales Invoice", is_enabled=1,
@@ -1689,7 +1717,7 @@ class TestTransactionReferenceField(unittest.TestCase):
 		self.assertEqual(self._ref_value(), txn.name)
 
 	def test_no_reference_field_configured_is_a_no_op(self):
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
 
 		_set_payable_row(
 			"Sales Invoice", is_enabled=1,
@@ -1706,7 +1734,7 @@ class TestTransactionReferenceField(unittest.TestCase):
 	def test_bad_field_name_does_not_break_success(self):
 		"""The customer has already been charged — a typo in config must not
 		roll back the SUCCESS or the Payment Entry."""
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
 
 		_set_payable_row(
 			"Sales Invoice", is_enabled=1,
@@ -1721,7 +1749,7 @@ class TestTransactionReferenceField(unittest.TestCase):
 
 	def test_mapped_finalization_is_gone(self):
 		"""The status-mapping path and its config keys no longer exist."""
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
 
 		self.assertFalse(hasattr(txn_service, "_apply_mapped_finalization"))
 		config = txn_service._get_payable_config("Sales Invoice")
@@ -1777,7 +1805,7 @@ class TestAutoCancelResolution(unittest.TestCase):
 			self.machine = machine
 
 	def test_default_when_nothing_configured(self):
-		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+		from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 			DEFAULT_AUTO_CANCEL_MINUTES,
 			resolve_auto_cancel_minutes,
 		)
@@ -1787,7 +1815,7 @@ class TestAutoCancelResolution(unittest.TestCase):
 		self.assertEqual(resolve_auto_cancel_minutes(self.MACHINE), DEFAULT_AUTO_CANCEL_MINUTES)
 
 	def test_settings_value_is_used(self):
-		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+		from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 			resolve_auto_cancel_minutes,
 		)
 
@@ -1796,7 +1824,7 @@ class TestAutoCancelResolution(unittest.TestCase):
 		self.assertEqual(resolve_auto_cancel_minutes(self.MACHINE), 20)
 
 	def test_machine_override_beats_settings(self):
-		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+		from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 			resolve_auto_cancel_minutes,
 		)
 
@@ -1807,7 +1835,7 @@ class TestAutoCancelResolution(unittest.TestCase):
 	def test_machine_resolved_by_machine_name_not_row_name(self):
 		"""The core bug: Pinelabs Machine Config is a child table, so its
 		`name` is a hash. Looking it up by machine_name always returned None."""
-		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+		from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 			resolve_auto_cancel_minutes,
 		)
 
@@ -1824,8 +1852,8 @@ class TestAutoCancelResolution(unittest.TestCase):
 	def test_app_cutoff_always_exceeds_gateway_timeout(self):
 		"""The invariant: the app must never give up before the terminal does.
 		Checked across the full range Pine Labs uses in its own examples."""
-		from pinelabs_fin.api import terminal
-		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+		from pinelabs_finstein.api import terminal
+		from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 			resolve_auto_cancel_minutes,
 		)
 
@@ -1841,8 +1869,8 @@ class TestAutoCancelResolution(unittest.TestCase):
 
 	def test_client_and_age_out_read_the_same_number(self):
 		"""Both timers derive from one value — they cannot drift apart."""
-		from pinelabs_fin.api import terminal
-		from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
+		from pinelabs_finstein.api import terminal
+		from pinelabs_finstein.api.pinelabs_client import get_pinelabs_client
 
 		self._set_machine_override(11)
 		client = get_pinelabs_client(machine_name=self.MACHINE)
@@ -1853,7 +1881,7 @@ class TestAutoCancelResolution(unittest.TestCase):
 		)
 
 	def test_unknown_machine_falls_back_to_settings(self):
-		from pinelabs_fin.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
+		from pinelabs_finstein.pinelabs_fin.doctype.pinelabs_settings.pinelabs_settings import (
 			resolve_auto_cancel_minutes,
 		)
 
@@ -1866,7 +1894,7 @@ class TestSecretRedaction(unittest.TestCase):
 	"""Gateway credentials must never reach a log file in cleartext."""
 
 	def test_masks_secret_keys_at_any_depth(self):
-		from pinelabs_fin.api.redact import MASK, redact
+		from pinelabs_finstein.api.redact import MASK, redact
 
 		payload = {
 			"MerchantID": "1234",
@@ -1884,13 +1912,13 @@ class TestSecretRedaction(unittest.TestCase):
 		self.assertEqual(out["rows"][0]["access_token"], MASK)
 
 	def test_key_spelling_variants_are_caught(self):
-		from pinelabs_fin.api.redact import MASK, redact
+		from pinelabs_finstein.api.redact import MASK, redact
 
 		for key in ("client_secret", "clientSecret", "Client-Secret", "SECURITYTOKEN", "x-verify"):
 			self.assertEqual(redact({key: "live"})[key], MASK, key)
 
 	def test_input_is_not_mutated(self):
-		from pinelabs_fin.api.redact import redact
+		from pinelabs_finstein.api.redact import redact
 
 		original = {"SecurityToken": "live-token"}
 		redact(original)
@@ -1900,11 +1928,11 @@ class TestSecretRedaction(unittest.TestCase):
 		"""End-to-end: the actual logged string for a real upload payload."""
 		import json as _json
 
-		from pinelabs_fin.api.redact import redact
+		from pinelabs_finstein.api.redact import redact
 
 		_ensure_default_machine()
 		_ensure_named_machine("Test Machine")
-		from pinelabs_fin.api.pinelabs_client import get_pinelabs_client
+		from pinelabs_finstein.api.pinelabs_client import get_pinelabs_client
 
 		client = get_pinelabs_client(machine_name="Test Machine")
 		payload = client._build_transaction_payload(
@@ -1967,10 +1995,10 @@ class TestSecurityHardening(unittest.TestCase):
 		return {"success": True, "data": {"ResponseCode": 0, "ResponseMessage": "ok", "PlutusTransactionReferenceID": ref}}
 
 	def _initiate(self, **kwargs):
-		from pinelabs_fin.api import terminal
+		from pinelabs_finstein.api import terminal
 
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw",
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.upload_billed_raw",
 			return_value=self._accepted(int(frappe.generate_hash(length=10), 16) % (10 ** 8)),
 		) as upload:
 			result = terminal.initiate_terminal_payment(
@@ -1985,9 +2013,9 @@ class TestSecurityHardening(unittest.TestCase):
 
 	def test_amount_above_outstanding_is_refused_before_the_gateway(self):
 		with patch(
-			"pinelabs_fin.api.pinelabs_client.PineLabsClient.upload_billed_raw"
+			"pinelabs_finstein.api.pinelabs_client.PineLabsClient.upload_billed_raw"
 		) as upload:
-			from pinelabs_fin.api import terminal
+			from pinelabs_finstein.api import terminal
 
 			with self.assertRaises(frappe.ValidationError) as ctx:
 				terminal.initiate_terminal_payment(
@@ -1997,7 +2025,7 @@ class TestSecurityHardening(unittest.TestCase):
 		upload.assert_not_called()
 
 	def test_zero_and_negative_amount_refused(self):
-		from pinelabs_fin.api import terminal
+		from pinelabs_finstein.api import terminal
 
 		for bad in (-50, 0.001):
 			with self.assertRaises(frappe.ValidationError):
@@ -2015,7 +2043,7 @@ class TestSecurityHardening(unittest.TestCase):
 	# ---- retry ------------------------------------------------------------
 
 	def test_retry_refused_unless_failed_or_cancelled(self):
-		from pinelabs_fin.api import terminal
+		from pinelabs_finstein.api import terminal
 
 		result, _ = self._initiate()
 		with self.assertRaises(frappe.ValidationError) as ctx:  # PENDING
@@ -2025,7 +2053,7 @@ class TestSecurityHardening(unittest.TestCase):
 	# ---- permissions ------------------------------------------------------
 
 	def test_missing_and_forbidden_documents_are_indistinguishable(self):
-		from pinelabs_fin.api import terminal
+		from pinelabs_finstein.api import terminal
 
 		frappe.set_user(self._powerless_user())
 		messages = []
@@ -2036,8 +2064,8 @@ class TestSecurityHardening(unittest.TestCase):
 		self.assertEqual(messages[0], messages[1])
 
 	def test_unknown_transaction_and_forbidden_transaction_look_alike(self):
-		from pinelabs_fin.api import terminal
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import terminal
+		from pinelabs_finstein.api import transaction as txn_service
 
 		txn = txn_service.create_transaction(
 			reference_doctype="Sales Invoice", reference_name=self.invoice.name,
@@ -2052,7 +2080,7 @@ class TestSecurityHardening(unittest.TestCase):
 		self.assertEqual(seen[0], seen[1])
 
 	def test_settings_metadata_endpoints_are_system_manager_only(self):
-		from pinelabs_fin.api import customer_contact
+		from pinelabs_finstein.api import customer_contact
 
 		frappe.set_user(self._powerless_user())
 		with self.assertRaises(frappe.PermissionError):
@@ -2062,7 +2090,7 @@ class TestSecurityHardening(unittest.TestCase):
 
 	def test_button_config_endpoint_works_without_settings_access(self):
 		"""Cashiers cannot read Pinelabs Settings, but must still get buttons."""
-		from pinelabs_fin.api import access
+		from pinelabs_finstein.api import access
 
 		frappe.set_user(self._powerless_user())
 		with self.assertRaises(frappe.PermissionError):
@@ -2076,7 +2104,7 @@ class TestSecurityHardening(unittest.TestCase):
 			)
 
 	def test_payment_endpoints_accept_post_only(self):
-		from pinelabs_fin.api import access, config, plural, terminal, webhook
+		from pinelabs_finstein.api import access, config, plural, terminal, webhook
 
 		for fn in (
 			terminal.initiate_terminal_payment, terminal.poll_terminal_status,
@@ -2103,7 +2131,7 @@ class TestSecurityHardening(unittest.TestCase):
 	def test_lock_and_reload_returns_the_latest_row(self):
 		"""A stale in-memory copy must not be trusted: the SUCCESS written by a
 		competing worker has to win, and no second Payment Entry may be built."""
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
 
 		result, _ = self._initiate()
 		stale = frappe.get_doc("Pinelabs Transaction", result["transaction_name"])
@@ -2117,7 +2145,7 @@ class TestSecurityHardening(unittest.TestCase):
 	# ---- stored payloads --------------------------------------------------
 
 	def test_stored_payloads_never_contain_the_security_token(self):
-		from pinelabs_fin.api.transaction import _to_json_str
+		from pinelabs_finstein.api.transaction import _to_json_str
 
 		token = "70D7509C-0A90-4938-A7F9-DB99B9B841D9"
 		for value in (
@@ -2131,7 +2159,7 @@ class TestSecurityHardening(unittest.TestCase):
 		self.assertIn("100", _to_json_str({"SecurityToken": token, "Amount": 100}))
 
 	def test_plural_header_secret_is_redacted(self):
-		from pinelabs_fin.api.redact import MASK, redact
+		from pinelabs_finstein.api.redact import MASK, redact
 
 		out = redact({"x-plural-client-secret": "s3", "x-plural-client-id": "cid", "Authorization": "Bearer t"})
 		self.assertEqual(out["x-plural-client-secret"], MASK)
@@ -2139,7 +2167,7 @@ class TestSecurityHardening(unittest.TestCase):
 		self.assertEqual(out["x-plural-client-id"], "cid")
 
 	def test_customer_contact_masked_only_when_asked(self):
-		from pinelabs_fin.api.redact import MASK, redact
+		from pinelabs_finstein.api.redact import MASK, redact
 
 		body = {"customer": {"email_id": "a@b.com", "mobile_number": "9999999999"}}
 		self.assertEqual(redact(body)["customer"]["email_id"], "a@b.com")
@@ -2149,7 +2177,7 @@ class TestSecurityHardening(unittest.TestCase):
 
 class TestGatewayUrlGuard(unittest.TestCase):
 	def test_rules(self):
-		from pinelabs_fin.api.url_guard import assert_gateway_url
+		from pinelabs_finstein.api.url_guard import assert_gateway_url
 
 		# allowed
 		assert_gateway_url("https://api.pluralpay.in", "u")
@@ -2216,12 +2244,12 @@ class TestWebhookHardening(unittest.TestCase):
 				return raw if as_text else raw.encode("utf-8")
 
 		frappe.local.request = _Req()
-		from pinelabs_fin.api import webhook
+		from pinelabs_finstein.api import webhook
 
 		return webhook.handle_webhook()
 
 	def _plural_txn(self, amount=100):
-		from pinelabs_fin.api import transaction as txn_service
+		from pinelabs_finstein.api import transaction as txn_service
 
 		txn = txn_service.create_transaction(
 			reference_doctype="Sales Invoice", reference_name=self.invoice.name,
@@ -2232,14 +2260,14 @@ class TestWebhookHardening(unittest.TestCase):
 	def test_matches_on_our_merchant_reference_when_order_id_differs(self):
 		"""Plural's ``order_id`` is its own order id, not the payment-link id we
 		stored — the PLT- reference in the payload must still find the row."""
-		from pinelabs_fin.api import webhook
+		from pinelabs_finstein.api import webhook
 
 		txn = self._plural_txn()
 		payload = {"order_id": "v1-SIM-O-unrelated", "merchant_order_reference": txn.name}
 		self.assertEqual(webhook._find_transaction(webhook._candidate_ids(payload)), txn.name)
 
 	def test_candidate_ids_prefers_our_reference_and_dedupes(self):
-		from pinelabs_fin.api import webhook
+		from pinelabs_finstein.api import webhook
 
 		ids = webhook._candidate_ids({
 			"order_id": "o1", "merchant_order_reference": "PLT-1", "payment_link_id": "o1",
@@ -2252,7 +2280,7 @@ class TestWebhookHardening(unittest.TestCase):
 		self.assertIn("signature", result["message"].lower())
 
 	def test_amount_mismatch_is_not_booked(self):
-		from pinelabs_fin.api import webhook
+		from pinelabs_finstein.api import webhook
 
 		txn = self._plural_txn(amount=100)
 		self.assertTrue(webhook._amount_matches({"order_amount": {"value": 10000, "currency": "INR"}}, txn))

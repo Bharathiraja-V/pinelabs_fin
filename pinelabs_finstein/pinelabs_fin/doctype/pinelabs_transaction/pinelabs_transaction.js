@@ -207,7 +207,7 @@ function retry_terminal(frm) {
 
 function refresh_plural_status(frm) {
 	frappe.call({
-		method: "pinelabs_fin.api.plural.refresh_payment_link_status",
+		method: "pinelabs_finstein.api.plural.refresh_payment_link_status",
 		args: { transaction_name: frm.doc.name },
 		freeze: true,
 		freeze_message: __("Refreshing status..."),
@@ -226,7 +226,7 @@ function refresh_plural_status(frm) {
 function cancel_terminal(frm) {
 	frappe.confirm(__("Cancel this terminal payment?"), () => {
 		frappe.call({
-			method: "pinelabs_fin.api.terminal.cancel_terminal_payment",
+			method: "pinelabs_finstein.api.terminal.cancel_terminal_payment",
 			args: { transaction_name: frm.doc.name, reason: "cancelled from transaction record" },
 			freeze: true,
 			freeze_message: __("Cancelling..."),

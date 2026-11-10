@@ -88,7 +88,7 @@ Skip this if you only use **Pay on Machine**. In **Pinelabs Settings → Plural 
 Click **Test Plural Connection** to verify. Then on the Plural dashboard, register the webhook URL:
 
 ```
-https://<your-erpnext-host>/api/method/pinelabs_fin.api.webhook.handle_webhook
+https://<your-erpnext-host>/api/method/pinelabs_finstein.api.webhook.handle_webhook
 ```
 
 ### Configure Mode of Payment accounts (required)
@@ -190,7 +190,7 @@ Three whitelisted Python entry points — callable from JS or REST.
 
 ```python
 # Pay on Machine
-pinelabs_fin.api.terminal.initiate_terminal_payment(
+pinelabs_finstein.api.terminal.initiate_terminal_payment(
     reference_doctype,           # required — e.g. "Sales Invoice"
     reference_name,              # required — e.g. "ACC-SINV-2026-00054"
     mode_of_payment,             # required — "PineLabs - Card" or "PineLabs - UPI"
@@ -199,7 +199,7 @@ pinelabs_fin.api.terminal.initiate_terminal_payment(
 )
 
 # Send Payment Link
-pinelabs_fin.api.plural.initiate_payment_link(
+pinelabs_finstein.api.plural.initiate_payment_link(
     reference_doctype,           # required
     reference_name,              # required
     flow="all_methods",          # optional — "all_methods" / "upi_only" / "card_only"
@@ -210,7 +210,7 @@ pinelabs_fin.api.plural.initiate_payment_link(
 )
 
 # Poll a Pay-on-Machine transaction
-pinelabs_fin.api.terminal.check_terminal_status(
+pinelabs_finstein.api.terminal.check_terminal_status(
     transaction_name,            # required — the PLT-... from initiate_terminal_payment
     create_payment_entry=None,   # optional — late override of the same flag
 )

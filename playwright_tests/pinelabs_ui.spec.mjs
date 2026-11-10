@@ -1,4 +1,4 @@
-// Playwright UI test suite for pinelabs_fin — drives the Frappe Desk like a user.
+// Playwright UI test suite for pinelabs_finstein — drives the Frappe Desk like a user.
 // Maps to the manual test cases in pinelabs_test_cases.xlsx (UI-possible subset).
 // Auth via storageState.json (minted session). Fixtures from fixtures.json
 // (created by setup_fixtures.py). Run single-worker; some tests share data.

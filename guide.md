@@ -39,7 +39,7 @@ The single end-to-end reference for the app: what it does, how it is wired, how 
 
 ## 1. What this app is
 
-`pinelabs_fin` is a Frappe / ERPNext app that integrates Pine Labs payments into ERPNext. It adds two buttons to "payable" documents (Sales Invoice, POS Invoice, Payment Request, etc.):
+`pinelabs_finstein` is a Frappe / ERPNext app that integrates Pine Labs payments into ERPNext. It adds two buttons to "payable" documents (Sales Invoice, POS Invoice, Payment Request, etc.):
 
 - **Pay on Machine** — routes a payment to a physical Pine Labs Cloud terminal (card / UPI on the device).
 - **Send Payment Link** — generates a Plural hosted payment link covering every method enabled in the Plural dashboard (card, UPI, net banking, wallets). The customer pays via SMS / Email link.
@@ -162,7 +162,7 @@ All app configuration. Form sections (in order):
 | **Plural API Configuration** | Enable toggle, Client ID / Secret, Webhook Secret, Base URL, Link Expiry, Last Sync, Test Connection button |
 | **Payable Documents** | Per-doctype eligibility + per-button toggles + docstatus gating + customer-contact mapping |
 
-Validation enforced in [pinelabs_settings.py](pinelabs_fin/pinelabs_fin/doctype/pinelabs_settings/pinelabs_settings.py):
+Validation enforced in [pinelabs_settings.py](pinelabs_finstein/pinelabs_fin/doctype/pinelabs_settings/pinelabs_settings.py):
 
 - At most one machine may be `Is Default`. Empty machines table is OK.
 - Plural credentials + Webhook Secret required when payment links enabled. Webhook secret must be ≥ 16 characters.
@@ -254,7 +254,7 @@ api/                     — HTTP / orchestration
   config.py              — test_plural_connection (Test Connection button)
   test_phase1.py         — Test suite
 
-pinelabs_fin/doctype/    — Frappe doctypes
+pinelabs_finstein/doctype/    — Frappe doctypes
   pinelabs_settings/         — Singleton + controller + form JS
   pinelabs_machine_config/   — Cloud terminal credentials child row
   pinelabs_machine_mapping/  — Routing rule child row
@@ -297,8 +297,8 @@ For each Payable Doctype row the JS evaluates:
 
 ```bash
 cd ~/frappe-bench
-bench get-app https://github.com/<owner>/pinelabs_fin
-bench --site <your-site> install-app pinelabs_fin
+bench get-app https://github.com/<owner>/pinelabs_finstein
+bench --site <your-site> install-app pinelabs_finstein
 bench --site <your-site> migrate
 bench build
 bench restart
@@ -348,7 +348,7 @@ In your **Plural dashboard**, register the webhook:
 
 | | |
 |---|---|
-| URL | `https://<your-erpnext-host>/api/method/pinelabs_fin.api.webhook.handle_webhook` |
+| URL | `https://<your-erpnext-host>/api/method/pinelabs_finstein.api.webhook.handle_webhook` |
 | Method | POST |
 | Header | `X-Verify` = HMAC-SHA256 of the raw request body using your Webhook Secret, lower-case hex |
 
@@ -423,7 +423,7 @@ Plural requires customer `email_id` and `mobile_number` to deliver the SMS / Ema
 
 If after all three priorities both are empty, the button throws a clear error and prints a resolver trace (which mapping was tried, which raw value was read) so you can fix the mapping.
 
-The resolver lives in [api/customer_contact.py](pinelabs_fin/api/customer_contact.py).
+The resolver lives in [api/customer_contact.py](pinelabs_finstein/api/customer_contact.py).
 
 ---
 
@@ -464,8 +464,8 @@ Both route through `mark_success` / `mark_failed`, which are idempotent on termi
 
 ## 12. Webhook handler
 
-**Endpoint:** `POST /api/method/pinelabs_fin.api.webhook.handle_webhook`
-**Module:** [api/webhook.py](pinelabs_fin/api/webhook.py)
+**Endpoint:** `POST /api/method/pinelabs_finstein.api.webhook.handle_webhook`
+**Module:** [api/webhook.py](pinelabs_finstein/api/webhook.py)
 **Decorator:** `@frappe.whitelist(allow_guest=True)`
 
 ### HTTP contract
@@ -505,7 +505,7 @@ Three whitelisted Python entry points — callable from JS or REST — and two J
 
 ```python
 # Pay on Machine
-pinelabs_fin.api.terminal.initiate_terminal_payment(
+pinelabs_finstein.api.terminal.initiate_terminal_payment(
     reference_doctype,    # required — e.g. "Sales Invoice"
     reference_name,       # required — e.g. "ACC-SINV-2026-00054"
     mode_of_payment,      # required — a PineLabs-enabled Mode of Payment
@@ -513,7 +513,7 @@ pinelabs_fin.api.terminal.initiate_terminal_payment(
 )
 
 # Send Payment Link
-pinelabs_fin.api.plural.initiate_payment_link(
+pinelabs_finstein.api.plural.initiate_payment_link(
     reference_doctype,        # required
     reference_name,           # required
     flow="all_methods",       # optional — "all_methods" / "upi_only" / "card_only"
@@ -523,7 +523,7 @@ pinelabs_fin.api.plural.initiate_payment_link(
 )
 
 # Poll a Pay-on-Machine transaction
-pinelabs_fin.api.terminal.check_terminal_status(
+pinelabs_finstein.api.terminal.check_terminal_status(
     transaction_name,    # required — the PLT-... from initiate_terminal_payment
 )
 ```
@@ -637,7 +637,7 @@ The form auto-refreshes via realtime when status changes.
 |---|---|
 | Plural sandbox | `https://pluraluat.v2.pinepg.in` |
 | Plural production | `https://api.pluralpay.in` |
-| Webhook endpoint | `https://<your-erpnext-host>/api/method/pinelabs_fin.api.webhook.handle_webhook` |
+| Webhook endpoint | `https://<your-erpnext-host>/api/method/pinelabs_finstein.api.webhook.handle_webhook` |
 
 **Useful commands**
 
@@ -646,7 +646,7 @@ bench start                                                  # dev server
 bench --site <site> migrate                                  # apply schema + patches
 bench --site <site> console                                  # Python REPL with frappe
 bench --site <site> tail-logs                                # tail site logs
-bench --site <site> run-tests --app pinelabs_fin             # full test run
+bench --site <site> run-tests --app pinelabs_finstein             # full test run
 bench --site <site> scheduler enable && scheduler resume     # ensure cron runs
 pkill -f "frappe serve --port <port>"                        # reload web code
 ```

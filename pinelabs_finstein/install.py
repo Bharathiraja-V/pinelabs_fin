@@ -10,7 +10,7 @@ install-app``, Frappe records every ``patches.txt`` entry in the Patch
 Log as already-run **without executing it** (patches exist to migrate
 pre-existing data; a fresh install has none). So seed data that must
 exist after a clean install belongs in ``after_install``, which runs on
-every fresh install. The patch ``pinelabs_fin.patches.install_pinelabs_modes``
+every fresh install. The patch ``pinelabs_finstein.patches.install_pinelabs_modes``
 calls the same function so sites that *upgrade* from an older version
 (where this seed never ran) also get the rows.
 """
